@@ -1,0 +1,14 @@
+{
+  "name": "multiplayer-2d-game-template",
+  "version": "1.0.0",
+  "description": "A template for a 2-player 2D multiplayer game using HTML5 Canvas and Socket.io",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "socket.io": "^4.8.0"
+  }
+}
