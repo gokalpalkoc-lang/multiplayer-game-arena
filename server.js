@@ -392,7 +392,27 @@ function updatePhysics() {
                         // Check if game over? 
                         const alivePlayers = Object.values(players).filter(pl => !pl.isEliminated);
                         if (alivePlayers.length <= 1) {
-                            // Can handle game over state here, but for now let's just let it run or reset.
+                            let winnerId = null;
+                            if (alivePlayers.length === 1) {
+                                winnerId = alivePlayers[0].id;
+                            }
+                            
+                            io.emit('gameOver', { winnerId: winnerId });
+                            stopGameLoop();
+                            
+                            // Return to lobby after 5 seconds
+                            setTimeout(() => {
+                                gameState = 'lobby';
+                                Object.values(players).forEach(p => {
+                                    p.isReady = false;
+                                    p.health = 100;
+                                    p.ammo = 16;
+                                    p.isReloading = false;
+                                    p.isEliminated = false;
+                                });
+                                broadcastLobbyState();
+                                io.emit('resetToLobby');
+                            }, 5000);
                         }
                     }
                     break;
