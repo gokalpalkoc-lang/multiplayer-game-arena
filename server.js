@@ -3,6 +3,7 @@ const app = express();
 const http = require('http');
 const server = http.createServer(app);
 const { Server } = require("socket.io");
+const { v4: uuidv4 } = require('uuid');
 const io = new Server(server, {
   cors: {
     origin: "*", // Allow all origins to connect (or specify "http://gokalp.alkoc.net")
@@ -18,6 +19,10 @@ const uploadedMaps = [
 ];
 let gameState = 'lobby'; // 'lobby' or 'playing'
 let totalGamesPlayed = 0;
+
+let bullets = {};
+let gameLoopInterval = null;
+let currentMapData = null;
 
 const GAME_WIDTH = 800;
 const GAME_HEIGHT = 600;
@@ -54,7 +59,12 @@ io.on('connection', (socket) => {
         y: Math.floor(Math.random() * (GAME_HEIGHT - 50)) + 25,
         color: `hsl(${Math.random() * 360}, 100%, 50%)`,
         id: socket.id,
-        isReady: false
+        isReady: false,
+        health: 100,
+        ammo: 16,
+        isReloading: false,
+        isEliminated: false,
+        lastShotTime: 0
     };
 
     // If game already started, tell them (they might just watch, but we only have 2 players usually in 1 room)
@@ -89,7 +99,14 @@ io.on('connection', (socket) => {
             // If someone leaves during the game and < 2 players remain, maybe reset to lobby?
             // For now, let's reset to lobby
             gameState = 'lobby';
-            Object.values(players).forEach(p => p.isReady = false);
+            stopGameLoop();
+            Object.values(players).forEach(p => {
+                p.isReady = false;
+                p.health = 100;
+                p.ammo = 16;
+                p.isReloading = false;
+                p.isEliminated = false;
+            });
             broadcastLobbyState();
             io.emit('resetToLobby');
         }
@@ -151,6 +168,15 @@ io.on('connection', (socket) => {
                 gameState = 'playing';
                 totalGamesPlayed++;
                 
+                // Reset player stats for the new game
+                playerKeys.forEach(id => {
+                    players[id].health = 100;
+                    players[id].ammo = 16;
+                    players[id].isReloading = false;
+                    players[id].isEliminated = false;
+                    players[id].lastShotTime = 0;
+                });
+                
                 // Tally votes
                 let mapVotes = new Array(uploadedMaps.length).fill(0);
                 Object.values(players).forEach(p => {
@@ -177,6 +203,7 @@ io.on('connection', (socket) => {
 
                 // Parse map for start positions
                 if (chosenMap && chosenMap.data) {
+                    currentMapData = chosenMap.data;
                     const tileSize = chosenMap.data.tileSize || 50;
                     const mapGrid = chosenMap.data.data;
                     const pKeys = Object.keys(players);
@@ -209,6 +236,8 @@ io.on('connection', (socket) => {
                             }
                         }
                     }
+                } else {
+                    currentMapData = null;
                 }
 
                 io.emit('gameStart', {
@@ -216,21 +245,172 @@ io.on('connection', (socket) => {
                     players: players, // Ensure all clients have latest init position
                     playCount: totalGamesPlayed
                 });
+                
+                startGameLoop();
             }
         }
     }
     // --- END NEW LOBBY EVENTS ---
 
     socket.on('playerMovement', (movementData) => {
-        if (players[socket.id]) {
+        if (players[socket.id] && !players[socket.id].isEliminated) {
             players[socket.id].x = movementData.x;
             players[socket.id].y = movementData.y;
             players[socket.id].facingRight = movementData.facingRight;
             // Broadcast the movement to all OTHER players
-            socket.broadcast.emit('playerMoved', players[socket.id]);
+            socket.broadcast.emit('playerMoved', { id: socket.id, ...movementData });
         }
     });
+
+    socket.on('shoot', (data) => {
+        const player = players[socket.id];
+        if (!player || player.isEliminated || gameState !== 'playing') return;
+
+        const now = Date.now();
+        if (player.ammo > 0 && !player.isReloading && (now - player.lastShotTime >= 40)) {
+            player.ammo--;
+            player.lastShotTime = now;
+
+            // Optional: send ammo update specifically to the shooter, 
+            // but the game loop broadcasts all player stats anyway.
+            socket.emit('ammoUpdate', player.ammo);
+
+            const bulletId = uuidv4();
+            const BULLET_SPEED = 15;
+            
+            // Normalize direction vector
+            const magnitude = Math.sqrt(data.dirX * data.dirX + data.dirY * data.dirY);
+            let nX = 0, nY = 0;
+            if (magnitude > 0) {
+                nX = data.dirX / magnitude;
+                nY = data.dirY / magnitude;
+            } else {
+                nX = player.facingRight ? 1 : -1;
+            } // Fallback if no direction
+            
+            bullets[bulletId] = {
+                id: bulletId,
+                x: player.x, // spawn at center of player
+                y: player.y,
+                vx: nX * BULLET_SPEED,
+                vy: nY * BULLET_SPEED,
+                ownerId: socket.id,
+                radius: 4
+            };
+        }
+    });
+
+    socket.on('reload', () => {
+        const player = players[socket.id];
+        if (!player || player.isEliminated || player.isReloading || player.ammo === 16 || gameState !== 'playing') return;
+
+        player.isReloading = true;
+        io.to(socket.id).emit('reloadStart');
+
+        setTimeout(() => {
+            if (players[socket.id] && players[socket.id].isReloading) {
+                players[socket.id].ammo = 16;
+                players[socket.id].isReloading = false;
+                io.to(socket.id).emit('ammoUpdate', 16);
+            }
+        }, 2000);
+    });
 });
+
+function startGameLoop() {
+    bullets = {};
+    if (gameLoopInterval) clearInterval(gameLoopInterval);
+    
+    // 60 FPS
+    gameLoopInterval = setInterval(() => {
+        updatePhysics();
+    }, 1000 / 60);
+}
+
+function stopGameLoop() {
+    if (gameLoopInterval) {
+        clearInterval(gameLoopInterval);
+        gameLoopInterval = null;
+    }
+}
+
+function updatePhysics() {
+    // Move and check bullet collisions
+    const bulletKeys = Object.keys(bullets);
+    for (let i = 0; i < bulletKeys.length; i++) {
+        const bId = bulletKeys[i];
+        const b = bullets[bId];
+        
+        b.x += b.vx;
+        b.y += b.vy;
+        
+        let destroyed = false;
+        
+        // 1. Map boundaries collision
+        if (b.x < 0 || b.x > GAME_WIDTH || b.y < 0 || b.y > GAME_HEIGHT) {
+            destroyed = true;
+        }
+        
+        // 2. Map tiles collision
+        if (!destroyed && currentMapData) {
+            const tileSize = currentMapData.tileSize || 50;
+            const col = Math.floor(b.x / tileSize);
+            const row = Math.floor(b.y / tileSize);
+            
+            if (row >= 0 && row < currentMapData.rows && col >= 0 && col < currentMapData.cols) {
+                if (currentMapData.data[row][col] === 1) { // 1 is a wall block
+                    destroyed = true;
+                }
+            }
+        }
+        
+        // 3. Player collision
+        if (!destroyed) {
+            const playerKeys = Object.keys(players);
+            for (let j = 0; j < playerKeys.length; j++) {
+                const pId = playerKeys[j];
+                const p = players[pId];
+                
+                // Don't hit owner or eliminated players
+                if (pId === b.ownerId || p.isEliminated) continue;
+                
+                // Simple circle collision (player approx 30x30, radius 15)
+                const dx = p.x - b.x;
+                const dy = p.y - b.y;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                
+                if (dist < 15 + b.radius) {
+                    // Hit!
+                    p.health -= 25;
+                    destroyed = true;
+                    
+                    if (p.health <= 0) {
+                        p.health = 0;
+                        p.isEliminated = true;
+                        io.emit('playerEliminated', pId);
+                        
+                        // Check if game over? 
+                        const alivePlayers = Object.values(players).filter(pl => !pl.isEliminated);
+                        if (alivePlayers.length <= 1) {
+                            // Can handle game over state here, but for now let's just let it run or reset.
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        
+        if (destroyed) {
+            delete bullets[bId];
+        }
+    }
+    
+    // Broadcast state to all clients
+    io.emit('gameStateUpdate', {
+        bullets: Object.values(bullets),
+        players: players // sending players syncs health, ammo, and isEliminated status
+    });
+}
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
