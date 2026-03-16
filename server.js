@@ -62,8 +62,8 @@ io.on('connection', (socket) => {
         isReady: false,
         health: 100,
         ammo: 16,
-        isReloading: false,
         isEliminated: false,
+        isPlaying: false,
         lastShotTime: 0
     };
 
@@ -95,20 +95,15 @@ io.on('connection', (socket) => {
         // If a player leaves during lobby, update everyone
         if (gameState === 'lobby') {
             broadcastLobbyState();
-        } else if (Object.keys(players).length < 2) {
-            // If someone leaves during the game and < 2 players remain, maybe reset to lobby?
-            // For now, let's reset to lobby
-            gameState = 'lobby';
-            stopGameLoop();
-            Object.values(players).forEach(p => {
-                p.isReady = false;
-                p.health = 100;
-                p.ammo = 16;
-                p.isReloading = false;
-                p.isEliminated = false;
-            });
-            broadcastLobbyState();
-            io.emit('resetToLobby');
+        } else if (gameState === 'playing') {
+            const alivePlayers = Object.values(players).filter(pl => !pl.isEliminated && pl.isPlaying);
+            if (alivePlayers.length <= 1) {
+                let winnerId = null;
+                if (alivePlayers.length === 1) {
+                    winnerId = alivePlayers[0].id;
+                }
+                triggerGameOver(winnerId);
+            }
         }
 
         io.emit('playerDisconnected', socket.id);
@@ -174,6 +169,7 @@ io.on('connection', (socket) => {
                     players[id].ammo = 16;
                     players[id].isReloading = false;
                     players[id].isEliminated = false;
+                    players[id].isPlaying = true;
                     players[id].lastShotTime = 0;
                 });
                 
@@ -317,6 +313,28 @@ io.on('connection', (socket) => {
     });
 });
 
+function triggerGameOver(winnerId) {
+    if (gameState !== 'playing') return;
+    io.emit('gameOver', { winnerId: winnerId });
+    stopGameLoop();
+    gameState = 'gameover'; // Prevent multiple triggers
+    
+    // Return to lobby after 5 seconds
+    setTimeout(() => {
+        gameState = 'lobby';
+        Object.values(players).forEach(p => {
+            p.isReady = false;
+            p.health = 100;
+            p.ammo = 16;
+            p.isReloading = false;
+            p.isEliminated = false;
+            p.isPlaying = false;
+        });
+        broadcastLobbyState();
+        io.emit('resetToLobby');
+    }, 5000);
+}
+
 function startGameLoop() {
     bullets = {};
     if (gameLoopInterval) clearInterval(gameLoopInterval);
@@ -390,29 +408,13 @@ function updatePhysics() {
                         io.emit('playerEliminated', pId);
                         
                         // Check if game over? 
-                        const alivePlayers = Object.values(players).filter(pl => !pl.isEliminated);
+                        const alivePlayers = Object.values(players).filter(pl => !pl.isEliminated && pl.isPlaying);
                         if (alivePlayers.length <= 1) {
                             let winnerId = null;
                             if (alivePlayers.length === 1) {
                                 winnerId = alivePlayers[0].id;
                             }
-                            
-                            io.emit('gameOver', { winnerId: winnerId });
-                            stopGameLoop();
-                            
-                            // Return to lobby after 5 seconds
-                            setTimeout(() => {
-                                gameState = 'lobby';
-                                Object.values(players).forEach(p => {
-                                    p.isReady = false;
-                                    p.health = 100;
-                                    p.ammo = 16;
-                                    p.isReloading = false;
-                                    p.isEliminated = false;
-                                });
-                                broadcastLobbyState();
-                                io.emit('resetToLobby');
-                            }, 5000);
+                            triggerGameOver(winnerId);
                         }
                     }
                     break;
