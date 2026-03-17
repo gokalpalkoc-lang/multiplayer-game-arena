@@ -4,6 +4,7 @@ const http = require('http');
 const server = http.createServer(app);
 const { Server } = require("socket.io");
 const { v4: uuidv4 } = require('uuid');
+const path = require('path');
 const io = new Server(server, {
   cors: {
     origin: "*", // Allow all origins to connect (or specify "http://gokalp.alkoc.net")
@@ -11,7 +12,13 @@ const io = new Server(server, {
   }
 });
 
-app.use(express.static('public'));
+// Use path.join to ensure the public directory is resolved correctly regardless of where the node process was started
+app.use(express.static(path.join(__dirname, 'public')));
+
+// Simple healthcheck endpoint for Render / cloud providers to verify the server is active
+app.get('/health', (req, res) => {
+    res.status(200).send('OK');
+});
 
 const lobbies = {}; // Map of lobbyId -> lobbyData
 const playerLobbies = {}; // Map of socket.id -> lobbyId
@@ -614,6 +621,7 @@ function updatePhysics(lobbyId) {
 }
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-    console.log(`Server listening on port ${PORT}`);
+// Explicitly bind to '0.0.0.0' so that it is properly accessible on cloud host networking
+server.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server listening on port ${PORT} at 0.0.0.0`);
 });
