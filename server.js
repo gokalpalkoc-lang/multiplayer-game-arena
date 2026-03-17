@@ -749,7 +749,9 @@ function updatePhysics(lobbyId) {
                         lobby.blockHealth[row][col] -= 25;
                         if (lobby.blockHealth[row][col] <= 0) {
                             lobby.currentMapData.data[row][col] = 0; // turn into empty tile
-                            io.to(lobbyId).emit('mapUpdate', { row: row, col: col, type: 0 }); // Tell clients block is broken
+                            io.to(lobbyId).emit('mapUpdate', { row: row, col: col, type: 0, health: 0 }); // Tell clients block is broken
+                        } else {
+                            io.to(lobbyId).emit('mapUpdate', { row: row, col: col, type: 3, health: lobby.blockHealth[row][col] }); // Inform clients of partial damage
                         }
                     }
                 }
@@ -838,6 +840,42 @@ function updatePhysics(lobbyId) {
             const itemId = itemKeys[i];
             const item = lobby.items[itemId];
             let itemConsumed = false;
+
+            // Item falling logic
+            if (lobby.currentMapData) {
+                item.vy = (item.vy || 0) + 0.5; // gravity
+                item.y += item.vy;
+                
+                const tileSize = lobby.currentMapData.tileSize || 50;
+                const radius = item.radius;
+                const leftCol = Math.floor((item.x - radius) / tileSize);
+                const rightCol = Math.floor((item.x + radius) / tileSize);
+                const bottomRow = Math.floor((item.y + radius) / tileSize);
+                
+                if (item.vy > 0 && bottomRow >= 0 && bottomRow < lobby.currentMapData.rows) {
+                    for (let c = leftCol; c <= rightCol; c++) {
+                        if (c >= 0 && c < lobby.currentMapData.cols) {
+                            const tileType = lobby.currentMapData.data[bottomRow][c];
+                            if (tileType === 1 || tileType === 3) {
+                                item.y = bottomRow * tileSize - radius - 0.01;
+                                item.vy = 0;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (item.y > GAME_HEIGHT) {
+                    item.y = GAME_HEIGHT - radius;
+                    item.vy = 0;
+                }
+            } else {
+                item.vy = (item.vy || 0) + 0.5;
+                item.y += item.vy;
+                if (item.y > GAME_HEIGHT - item.radius) {
+                    item.y = GAME_HEIGHT - item.radius;
+                    item.vy = 0;
+                }
+            }
 
             for (let j = 0; j < playerKeys.length; j++) {
                 const pId = playerKeys[j];
