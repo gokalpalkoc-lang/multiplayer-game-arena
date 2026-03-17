@@ -138,6 +138,8 @@ io.on('connection', (socket) => {
             isReady: false,
             health: 100,
             ammo: 16,
+            revolverAmmo: 6,
+            weapon: 'pistol',
             isEliminated: false,
             isPlaying: false,
             lastShotTime: 0
@@ -283,6 +285,8 @@ io.on('connection', (socket) => {
                 playerKeys.forEach(id => {
                     lobby.players[id].health = 100;
                     lobby.players[id].ammo = 16;
+                    lobby.players[id].revolverAmmo = 6;
+                    lobby.players[id].weapon = 'pistol';
                     lobby.players[id].isReloading = false;
                     lobby.players[id].isEliminated = false;
                     lobby.players[id].isPlaying = true;
@@ -387,18 +391,31 @@ io.on('connection', (socket) => {
         if (!player || player.isEliminated || lobby.gameState !== 'playing') return;
 
         const now = Date.now();
-        if (player.ammo > 0 && !player.isReloading && (now - player.lastShotTime >= 40)) {
-            player.ammo--;
-            player.lastShotTime = now;
+        const isRevolver = player.weapon === 'revolver';
+        const currentAmmo = isRevolver ? player.revolverAmmo : player.ammo;
+        const fireRate = 40; 
 
-            // Optional: send ammo update specifically to the shooter, 
-            // but the game loop broadcasts all player stats anyway.
-            socket.emit('ammoUpdate', player.ammo);
+        if (currentAmmo > 0 && !player.isReloading && (now - player.lastShotTime >= fireRate)) {
+            if (isRevolver) {
+                player.revolverAmmo--;
+            } else {
+                player.ammo--;
+            }
+            player.lastShotTime = now;
+            
+            if (isRevolver) {
+                 const magnitude = Math.sqrt(data.dirX * data.dirX + data.dirY * data.dirY);
+                 if (magnitude > 0) {
+                     player.x -= (data.dirX / magnitude) * 15;
+                     player.y -= (data.dirY / magnitude) * 15;
+                 }
+            }
+
+            socket.emit('ammoUpdate', isRevolver ? player.revolverAmmo : player.ammo);
 
             const bulletId = uuidv4();
             const BULLET_SPEED = 15;
             
-            // Normalize direction vector
             const magnitude = Math.sqrt(data.dirX * data.dirX + data.dirY * data.dirY);
             let nX = 0, nY = 0;
             if (magnitude > 0) {
@@ -406,17 +423,30 @@ io.on('connection', (socket) => {
                 nY = data.dirY / magnitude;
             } else {
                 nX = player.facingRight ? 1 : -1;
-            } // Fallback if no direction
+            }
             
             lobby.bullets[bulletId] = {
                 id: bulletId,
-                x: player.x, // spawn at center of player
+                x: player.x,
                 y: player.y,
                 vx: nX * BULLET_SPEED,
                 vy: nY * BULLET_SPEED,
                 ownerId: socket.id,
-                radius: 4
+                radius: isRevolver ? 2 : 4
             };
+        }
+    });
+
+    socket.on('switchWeapon', (weaponName) => {
+        const lobbyId = playerLobbies[socket.id];
+        if (!lobbyId || !lobbies[lobbyId]) return;
+        const lobby = lobbies[lobbyId];
+        const player = lobby.players[socket.id];
+
+        if (player && !player.isEliminated && (weaponName === 'pistol' || weaponName === 'revolver')) {
+            player.weapon = weaponName;
+            player.isReloading = false;
+            socket.emit('ammoUpdate', weaponName === 'revolver' ? player.revolverAmmo : player.ammo);
         }
     });
 
@@ -426,18 +456,30 @@ io.on('connection', (socket) => {
         const lobby = lobbies[lobbyId];
 
         const player = lobby.players[socket.id];
-        if (!player || player.isEliminated || player.isReloading || player.ammo === 16 || lobby.gameState !== 'playing') return;
+        if (!player || player.isEliminated || player.isReloading || lobby.gameState !== 'playing') return;
+
+        const isRevolver = player.weapon === 'revolver';
+        const maxAmmo = isRevolver ? 6 : 16;
+        const currentAmmo = isRevolver ? player.revolverAmmo : player.ammo;
+        const reloadTime = isRevolver ? 1000 : 2000;
+
+        if (currentAmmo === maxAmmo) return;
 
         player.isReloading = true;
         io.to(socket.id).emit('reloadStart');
 
         setTimeout(() => {
             if (lobby.players[socket.id] && lobby.players[socket.id].isReloading) {
-                lobby.players[socket.id].ammo = 16;
+                if (lobby.players[socket.id].weapon === 'revolver') {
+                    lobby.players[socket.id].revolverAmmo = 6;
+                    io.to(socket.id).emit('ammoUpdate', 6);
+                } else {
+                    lobby.players[socket.id].ammo = 16;
+                    io.to(socket.id).emit('ammoUpdate', 16);
+                }
                 lobby.players[socket.id].isReloading = false;
-                io.to(socket.id).emit('ammoUpdate', 16);
             }
-        }, 2000);
+        }, reloadTime);
     });
 });
 
@@ -459,6 +501,8 @@ function triggerGameOver(lobbyId, winnerId) {
             p.isReady = false;
             p.health = 100;
             p.ammo = 16;
+            p.revolverAmmo = 6;
+            p.weapon = 'pistol';
             p.isReloading = false;
             p.isEliminated = false;
             p.isPlaying = false;
