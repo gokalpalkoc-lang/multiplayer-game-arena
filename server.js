@@ -13,24 +13,26 @@ const io = new Server(server, {
 
 app.use(express.static('public'));
 
-const players = {};
+const lobbies = {}; // Map of lobbyId -> lobbyData
+const playerLobbies = {}; // Map of socket.id -> lobbyId
+
+// We can still keep uploadedMaps global if maps are meant to be shared across all games
 const uploadedMaps = [
     { name: "Default Arena", data: null } // null means no special map, use default canvas boundaries
 ];
-let gameState = 'lobby'; // 'lobby' or 'playing'
-let totalGamesPlayed = 0;
 
-let bullets = {};
-let gameLoopInterval = null;
-let currentMapData = null;
+let totalGamesPlayed = 0;
 
 const GAME_WIDTH = 800;
 const GAME_HEIGHT = 600;
 
-function broadcastLobbyState() {
+function broadcastLobbyState(lobbyId) {
+    const lobby = lobbies[lobbyId];
+    if (!lobby) return;
+
     // Tally votes to send to clients
     const mapVotes = new Array(uploadedMaps.length).fill(0);
-    Object.values(players).forEach(p => {
+    Object.values(lobby.players).forEach(p => {
         if (p.votedMapIndex !== undefined && p.votedMapIndex >= 0 && p.votedMapIndex < uploadedMaps.length) {
             mapVotes[p.votedMapIndex]++;
         }
@@ -42,86 +44,185 @@ function broadcastLobbyState() {
         maxPlayers: m.data ? m.data.maxPlayers : undefined
     }));
 
-    io.emit('lobbyState', {
-        players: players,
+    io.to(lobbyId).emit('lobbyState', {
+        id: lobby.id,
+        name: lobby.name,
+        creatorId: lobby.creatorId,
+        players: lobby.players,
         maps: mapsWithVotes,
-        gameState: gameState
+        gameState: lobby.gameState
     });
+}
+function broadcastActiveLobbies() {
+    const publicLobbies = Object.values(lobbies).map(l => ({
+        id: l.id,
+        name: l.name,
+        playerCount: Object.keys(l.players).length,
+        gameState: l.gameState
+    }));
+    io.emit('activeLobbies', publicLobbies);
 }
 
 
 io.on('connection', (socket) => {
     console.log('A user connected:', socket.id);
     
-    // Assign a random position and color to the new player
-    players[socket.id] = {
-        x: Math.floor(Math.random() * (GAME_WIDTH - 50)) + 25,
-        y: Math.floor(Math.random() * (GAME_HEIGHT - 50)) + 25,
-        color: `hsl(${Math.random() * 360}, 100%, 50%)`,
-        id: socket.id,
-        isReady: false,
-        health: 100,
-        ammo: 16,
-        isEliminated: false,
-        isPlaying: false,
-        lastShotTime: 0
-    };
-
-    // If game already started, tell them (they might just watch, but we only have 2 players usually in 1 room)
-    if (gameState === 'playing') {
-        socket.emit('gameAlreadyStarted'); // Edge case handling
-    }
-
-    // Send the current players object to the new player
-    socket.emit('currentPlayers', players);
+    // Send active lobbies to the new connection
+    broadcastActiveLobbies();
     
-    // Reset map votes for all players since player count changed
-    if (gameState === 'lobby') {
-        Object.values(players).forEach(p => {
+    socket.on('createLobby', () => {
+        const lobbyId = uuidv4().substring(0, 8); // Short ID for UI
+        lobbies[lobbyId] = {
+            id: lobbyId,
+            name: `${socket.id.substring(0,4)}'s Lobby`,
+            creatorId: socket.id,
+            players: {},
+            gameState: 'lobby',
+            bullets: {},
+            healingItems: {},
+            gameLoopInterval: null,
+            currentMapData: null
+        };
+        joinLobby(socket, lobbyId);
+        broadcastActiveLobbies();
+    });
+
+    // Handle user trying to join an existing lobby
+    socket.on('joinLobby', (lobbyId) => {
+        if (lobbies[lobbyId] && lobbies[lobbyId].gameState === 'lobby') {
+            joinLobby(socket, lobbyId);
+        } else {
+            socket.emit('lobbyError', 'Lobby not found or game already in progress.');
+        }
+    });
+
+    socket.on('leaveLobby', () => {
+        leaveLobby(socket);
+    });
+    
+    socket.on('renameLobby', (newName) => {
+        const lobbyId = playerLobbies[socket.id];
+        if (!lobbyId || !lobbies[lobbyId]) return;
+        const lobby = lobbies[lobbyId];
+        
+        if (lobby.creatorId === socket.id && newName && typeof newName === 'string') {
+            lobby.name = newName.substring(0, 30); // Max 30 chars
+            broadcastLobbyState(lobbyId);
+            broadcastActiveLobbies();
+        }
+    });
+
+    function joinLobby(socket, lobbyId) {
+        const lobby = lobbies[lobbyId];
+        if (!lobby) return;
+
+        // Leave current lobby if any
+        leaveLobby(socket);
+
+        socket.join(lobbyId);
+        playerLobbies[socket.id] = lobbyId;
+
+        // Assign a random position and color to the new player
+        lobby.players[socket.id] = {
+            x: Math.floor(Math.random() * (GAME_WIDTH - 50)) + 25,
+            y: Math.floor(Math.random() * (GAME_HEIGHT - 50)) + 25,
+            color: `hsl(${Math.random() * 360}, 100%, 50%)`,
+            id: socket.id,
+            isReady: false,
+            health: 100,
+            ammo: 16,
+            isEliminated: false,
+            isPlaying: false,
+            lastShotTime: 0
+        };
+
+        // Notify them they joined
+        socket.emit('lobbyJoined', lobbyId);
+
+        // Send the current players object to the new player
+        socket.emit('currentPlayers', lobby.players);
+        
+        // Reset map votes for all players in this lobby since player count changed
+        Object.values(lobby.players).forEach(p => {
             p.votedMapIndex = undefined;
         });
-    }
-    
-    // Broadcast lobby state to everyone so UI updates
-    broadcastLobbyState();
-    
-    // Broadcast the new player to all other players
-    socket.broadcast.emit('newPlayer', players[socket.id]);
-
-    socket.on('disconnect', () => {
-        console.log('User disconnected:', socket.id);
-        delete players[socket.id];
         
+        // Broadcast lobby state
+        broadcastLobbyState(lobbyId);
+        broadcastActiveLobbies();
+        
+        // Broadcast the new player to all other players in lobby
+        socket.to(lobbyId).emit('newPlayer', lobby.players[socket.id]);
+    }
+
+    function leaveLobby(socket) {
+        const lobbyId = playerLobbies[socket.id];
+        if (!lobbyId || !lobbies[lobbyId]) return;
+        
+        const lobby = lobbies[lobbyId];
+        delete lobby.players[socket.id];
+        delete playerLobbies[socket.id];
+        
+        socket.leave(lobbyId);
+        socket.emit('lobbyLeft');
+
+        if (Object.keys(lobby.players).length === 0) {
+            // Destroy empty lobby
+            if (lobby.gameLoopInterval) clearInterval(lobby.gameLoopInterval);
+            delete lobbies[lobbyId];
+            broadcastActiveLobbies();
+            return;
+        }
+
+        // Reassign creator if creator leaves
+        if (lobby.creatorId === socket.id) {
+            lobby.creatorId = Object.keys(lobby.players)[0]; // pass to next player
+        }
+
         // If a player leaves during lobby, update everyone
-        if (gameState === 'lobby') {
-            broadcastLobbyState();
-        } else if (gameState === 'playing') {
-            const alivePlayers = Object.values(players).filter(pl => !pl.isEliminated && pl.isPlaying);
+        if (lobby.gameState === 'lobby') {
+            broadcastLobbyState(lobbyId);
+        } else if (lobby.gameState === 'playing') {
+            const alivePlayers = Object.values(lobby.players).filter(pl => !pl.isEliminated && pl.isPlaying);
             if (alivePlayers.length <= 1) {
                 let winnerId = null;
                 if (alivePlayers.length === 1) {
                     winnerId = alivePlayers[0].id;
                 }
-                triggerGameOver(winnerId);
+                triggerGameOver(lobbyId, winnerId);
             }
         }
+        
+        io.to(lobbyId).emit('playerDisconnected', socket.id);
+        broadcastActiveLobbies();
+    }
 
-        io.emit('playerDisconnected', socket.id);
+    socket.on('disconnect', () => {
+        console.log('User disconnected:', socket.id);
+        leaveLobby(socket);
     });
 
     // --- NEW LOBBY EVENTS ---
     socket.on('toggleReady', () => {
-        if (players[socket.id] && gameState === 'lobby') {
-            players[socket.id].isReady = !players[socket.id].isReady;
-            broadcastLobbyState();
-            checkGameStart();
+        const lobbyId = playerLobbies[socket.id];
+        if (!lobbyId || !lobbies[lobbyId]) return;
+        const lobby = lobbies[lobbyId];
+
+        if (lobby.players[socket.id] && lobby.gameState === 'lobby') {
+            lobby.players[socket.id].isReady = !lobby.players[socket.id].isReady;
+            broadcastLobbyState(lobbyId);
+            checkGameStart(lobbyId);
         }
     });
 
     socket.on('voteMap', (index) => {
-        if (gameState !== 'lobby') return;
+        const lobbyId = playerLobbies[socket.id];
+        if (!lobbyId || !lobbies[lobbyId]) return;
+        const lobby = lobbies[lobbyId];
+
+        if (lobby.gameState !== 'lobby') return;
         
-        const lobbySize = Object.keys(players).length;
+        const lobbySize = Object.keys(lobby.players).length;
         const targetMap = uploadedMaps[index];
         
         if (targetMap && targetMap.data && targetMap.data.maxPlayers) {
@@ -131,14 +232,18 @@ io.on('connection', (socket) => {
             }
         }
         
-        if (players[socket.id] && index >= 0 && index < uploadedMaps.length) {
-            players[socket.id].votedMapIndex = index;
-            broadcastLobbyState();
+        if (lobby.players[socket.id] && index >= 0 && index < uploadedMaps.length) {
+            lobby.players[socket.id].votedMapIndex = index;
+            broadcastLobbyState(lobbyId);
         }
     });
 
     socket.on('uploadMap', (mapJsonStr) => {
-        if (gameState !== 'lobby') return;
+        const lobbyId = playerLobbies[socket.id];
+        if (!lobbyId || !lobbies[lobbyId]) return;
+        const lobby = lobbies[lobbyId];
+
+        if (lobby.gameState !== 'lobby') return;
         try {
             const mapObj = JSON.parse(mapJsonStr);
             if (mapObj.data && mapObj.cols && mapObj.rows) {
@@ -146,36 +251,40 @@ io.on('connection', (socket) => {
                     name: `Custom Map ${uploadedMaps.length}`,
                     data: mapObj
                 });
-                broadcastLobbyState();
+                // Broadcast to all active lobbies since maps are global
+                Object.keys(lobbies).forEach(id => broadcastLobbyState(id));
             }
         } catch (e) {
             console.error("Invalid map upload JSON from", socket.id);
         }
     });
     
-    function checkGameStart() {
-        const playerKeys = Object.keys(players);
+    function checkGameStart(lobbyId) {
+        const lobby = lobbies[lobbyId];
+        const playerKeys = Object.keys(lobby.players);
         // Require at least 2 players to start
         if (playerKeys.length >= 2) {
-            const allReady = playerKeys.every(id => players[id].isReady);
+            const allReady = playerKeys.every(id => lobby.players[id].isReady);
             if (allReady) {
                 // All are ready! Start the game.
-                gameState = 'playing';
+                lobby.gameState = 'playing';
+                lobby.healingItems = {};
                 totalGamesPlayed++;
+                broadcastActiveLobbies();
                 
                 // Reset player stats for the new game
                 playerKeys.forEach(id => {
-                    players[id].health = 100;
-                    players[id].ammo = 16;
-                    players[id].isReloading = false;
-                    players[id].isEliminated = false;
-                    players[id].isPlaying = true;
-                    players[id].lastShotTime = 0;
+                    lobby.players[id].health = 100;
+                    lobby.players[id].ammo = 16;
+                    lobby.players[id].isReloading = false;
+                    lobby.players[id].isEliminated = false;
+                    lobby.players[id].isPlaying = true;
+                    lobby.players[id].lastShotTime = 0;
                 });
                 
                 // Tally votes
                 let mapVotes = new Array(uploadedMaps.length).fill(0);
-                Object.values(players).forEach(p => {
+                Object.values(lobby.players).forEach(p => {
                     if (p.votedMapIndex !== undefined && p.votedMapIndex >= 0 && p.votedMapIndex < uploadedMaps.length) {
                         mapVotes[p.votedMapIndex]++;
                     }
@@ -199,18 +308,18 @@ io.on('connection', (socket) => {
 
                 // Parse map for start positions
                 if (chosenMap && chosenMap.data) {
-                    currentMapData = chosenMap.data;
+                    lobby.currentMapData = chosenMap.data;
                     const tileSize = chosenMap.data.tileSize || 50;
                     const mapGrid = chosenMap.data.data;
-                    const pKeys = Object.keys(players);
+                    const pKeys = Object.keys(lobby.players);
                     
                     if (chosenMap.data.playerStarts && chosenMap.data.playerStarts.length > 0) {
                         // New format: sequential array
                         const starts = chosenMap.data.playerStarts;
                         pKeys.forEach((pid, index) => {
                             if (index < starts.length) {
-                                players[pid].x = starts[index].c * tileSize + tileSize / 2;
-                                players[pid].y = starts[index].r * tileSize + tileSize / 2;
+                                lobby.players[pid].x = starts[index].c * tileSize + tileSize / 2;
+                                lobby.players[pid].y = starts[index].r * tileSize + tileSize / 2;
                             }
                         });
                     } else if (mapGrid) {
@@ -221,46 +330,54 @@ io.on('connection', (socket) => {
                         for (let r = 0; r < chosenMap.data.rows; r++) {
                             for (let c = 0; c < chosenMap.data.cols; c++) {
                                 if (mapGrid[r][c] === 2 && !p1Spawned && pKeys[0]) {
-                                    players[pKeys[0]].x = c * tileSize + tileSize / 2;
-                                    players[pKeys[0]].y = r * tileSize + tileSize / 2;
+                                    lobby.players[pKeys[0]].x = c * tileSize + tileSize / 2;
+                                    lobby.players[pKeys[0]].y = r * tileSize + tileSize / 2;
                                     p1Spawned = true;
                                 } else if (mapGrid[r][c] === 3 && !p2Spawned && pKeys[1]) {
-                                    players[pKeys[1]].x = c * tileSize + tileSize / 2;
-                                    players[pKeys[1]].y = r * tileSize + tileSize / 2;
+                                    lobby.players[pKeys[1]].x = c * tileSize + tileSize / 2;
+                                    lobby.players[pKeys[1]].y = r * tileSize + tileSize / 2;
                                     p2Spawned = true;
                                 }
                             }
                         }
                     }
                 } else {
-                    currentMapData = null;
+                    lobby.currentMapData = null;
                 }
 
-                io.emit('gameStart', {
+                io.to(lobbyId).emit('gameStart', {
                     map: chosenMap,
-                    players: players, // Ensure all clients have latest init position
+                    players: lobby.players, // Ensure all clients have latest init position
                     playCount: totalGamesPlayed
                 });
                 
-                startGameLoop();
+                startGameLoop(lobbyId);
             }
         }
     }
     // --- END NEW LOBBY EVENTS ---
 
     socket.on('playerMovement', (movementData) => {
-        if (players[socket.id] && !players[socket.id].isEliminated) {
-            players[socket.id].x = movementData.x;
-            players[socket.id].y = movementData.y;
-            players[socket.id].facingRight = movementData.facingRight;
+        const lobbyId = playerLobbies[socket.id];
+        if (!lobbyId || !lobbies[lobbyId]) return;
+        const lobby = lobbies[lobbyId];
+
+        if (lobby.players[socket.id] && !lobby.players[socket.id].isEliminated) {
+            lobby.players[socket.id].x = movementData.x;
+            lobby.players[socket.id].y = movementData.y;
+            lobby.players[socket.id].facingRight = movementData.facingRight;
             // Broadcast the movement to all OTHER players
-            socket.broadcast.emit('playerMoved', { id: socket.id, ...movementData });
+            socket.to(lobbyId).emit('playerMoved', { id: socket.id, ...movementData });
         }
     });
 
     socket.on('shoot', (data) => {
-        const player = players[socket.id];
-        if (!player || player.isEliminated || gameState !== 'playing') return;
+        const lobbyId = playerLobbies[socket.id];
+        if (!lobbyId || !lobbies[lobbyId]) return;
+        const lobby = lobbies[lobbyId];
+
+        const player = lobby.players[socket.id];
+        if (!player || player.isEliminated || lobby.gameState !== 'playing') return;
 
         const now = Date.now();
         if (player.ammo > 0 && !player.isReloading && (now - player.lastShotTime >= 40)) {
@@ -284,7 +401,7 @@ io.on('connection', (socket) => {
                 nX = player.facingRight ? 1 : -1;
             } // Fallback if no direction
             
-            bullets[bulletId] = {
+            lobby.bullets[bulletId] = {
                 id: bulletId,
                 x: player.x, // spawn at center of player
                 y: player.y,
@@ -297,32 +414,41 @@ io.on('connection', (socket) => {
     });
 
     socket.on('reload', () => {
-        const player = players[socket.id];
-        if (!player || player.isEliminated || player.isReloading || player.ammo === 16 || gameState !== 'playing') return;
+        const lobbyId = playerLobbies[socket.id];
+        if (!lobbyId || !lobbies[lobbyId]) return;
+        const lobby = lobbies[lobbyId];
+
+        const player = lobby.players[socket.id];
+        if (!player || player.isEliminated || player.isReloading || player.ammo === 16 || lobby.gameState !== 'playing') return;
 
         player.isReloading = true;
         io.to(socket.id).emit('reloadStart');
 
         setTimeout(() => {
-            if (players[socket.id] && players[socket.id].isReloading) {
-                players[socket.id].ammo = 16;
-                players[socket.id].isReloading = false;
+            if (lobby.players[socket.id] && lobby.players[socket.id].isReloading) {
+                lobby.players[socket.id].ammo = 16;
+                lobby.players[socket.id].isReloading = false;
                 io.to(socket.id).emit('ammoUpdate', 16);
             }
         }, 2000);
     });
 });
 
-function triggerGameOver(winnerId) {
-    if (gameState !== 'playing') return;
-    io.emit('gameOver', { winnerId: winnerId });
-    stopGameLoop();
-    gameState = 'gameover'; // Prevent multiple triggers
+function triggerGameOver(lobbyId, winnerId) {
+    const lobby = lobbies[lobbyId];
+    if (!lobby || lobby.gameState !== 'playing') return;
+
+    io.to(lobbyId).emit('gameOver', { winnerId: winnerId });
+    stopGameLoop(lobbyId);
+    lobby.gameState = 'gameover'; // Prevent multiple triggers
+    broadcastActiveLobbies();
     
     // Return to lobby after 5 seconds
     setTimeout(() => {
-        gameState = 'lobby';
-        Object.values(players).forEach(p => {
+        if (!lobbies[lobbyId]) return;
+        lobby.gameState = 'lobby';
+        lobby.healingItems = {};
+        Object.values(lobby.players).forEach(p => {
             p.isReady = false;
             p.health = 100;
             p.ammo = 16;
@@ -330,34 +456,42 @@ function triggerGameOver(winnerId) {
             p.isEliminated = false;
             p.isPlaying = false;
         });
-        broadcastLobbyState();
-        io.emit('resetToLobby');
+        broadcastLobbyState(lobbyId);
+        broadcastActiveLobbies();
+        io.to(lobbyId).emit('resetToLobby');
     }, 5000);
 }
 
-function startGameLoop() {
-    bullets = {};
-    if (gameLoopInterval) clearInterval(gameLoopInterval);
+function startGameLoop(lobbyId) {
+    const lobby = lobbies[lobbyId];
+    if (!lobby) return;
+
+    lobby.bullets = {};
+    if (lobby.gameLoopInterval) clearInterval(lobby.gameLoopInterval);
     
     // 60 FPS
-    gameLoopInterval = setInterval(() => {
-        updatePhysics();
+    lobby.gameLoopInterval = setInterval(() => {
+        updatePhysics(lobbyId);
     }, 1000 / 60);
 }
 
-function stopGameLoop() {
-    if (gameLoopInterval) {
-        clearInterval(gameLoopInterval);
-        gameLoopInterval = null;
+function stopGameLoop(lobbyId) {
+    const lobby = lobbies[lobbyId];
+    if (lobby && lobby.gameLoopInterval) {
+        clearInterval(lobby.gameLoopInterval);
+        lobby.gameLoopInterval = null;
     }
 }
 
-function updatePhysics() {
+function updatePhysics(lobbyId) {
+    const lobby = lobbies[lobbyId];
+    if (!lobby) return;
+
     // Move and check bullet collisions
-    const bulletKeys = Object.keys(bullets);
+    const bulletKeys = Object.keys(lobby.bullets);
     for (let i = 0; i < bulletKeys.length; i++) {
         const bId = bulletKeys[i];
-        const b = bullets[bId];
+        const b = lobby.bullets[bId];
         
         b.x += b.vx;
         b.y += b.vy;
@@ -370,13 +504,13 @@ function updatePhysics() {
         }
         
         // 2. Map tiles collision
-        if (!destroyed && currentMapData) {
-            const tileSize = currentMapData.tileSize || 50;
+        if (!destroyed && lobby.currentMapData) {
+            const tileSize = lobby.currentMapData.tileSize || 50;
             const col = Math.floor(b.x / tileSize);
             const row = Math.floor(b.y / tileSize);
             
-            if (row >= 0 && row < currentMapData.rows && col >= 0 && col < currentMapData.cols) {
-                if (currentMapData.data[row][col] === 1) { // 1 is a wall block
+            if (row >= 0 && row < lobby.currentMapData.rows && col >= 0 && col < lobby.currentMapData.cols) {
+                if (lobby.currentMapData.data[row][col] === 1) { // 1 is a wall block
                     destroyed = true;
                 }
             }
@@ -384,10 +518,10 @@ function updatePhysics() {
         
         // 3. Player collision
         if (!destroyed) {
-            const playerKeys = Object.keys(players);
+            const playerKeys = Object.keys(lobby.players);
             for (let j = 0; j < playerKeys.length; j++) {
                 const pId = playerKeys[j];
-                const p = players[pId];
+                const p = lobby.players[pId];
                 
                 // Don't hit owner or eliminated players
                 if (pId === b.ownerId || p.isEliminated) continue;
@@ -405,16 +539,26 @@ function updatePhysics() {
                     if (p.health <= 0) {
                         p.health = 0;
                         p.isEliminated = true;
-                        io.emit('playerEliminated', pId);
+                        io.to(lobbyId).emit('playerEliminated', pId);
+                        
+                        // spawn a healing item
+                        const itemId = uuidv4();
+                        lobby.healingItems = lobby.healingItems || {};
+                        lobby.healingItems[itemId] = {
+                            id: itemId,
+                            x: p.x,
+                            y: p.y,
+                            radius: 10
+                        };
                         
                         // Check if game over? 
-                        const alivePlayers = Object.values(players).filter(pl => !pl.isEliminated && pl.isPlaying);
+                        const alivePlayers = Object.values(lobby.players).filter(pl => !pl.isEliminated && pl.isPlaying);
                         if (alivePlayers.length <= 1) {
                             let winnerId = null;
                             if (alivePlayers.length === 1) {
                                 winnerId = alivePlayers[0].id;
                             }
-                            triggerGameOver(winnerId);
+                            triggerGameOver(lobbyId, winnerId);
                         }
                     }
                     break;
@@ -423,14 +567,49 @@ function updatePhysics() {
         }
         
         if (destroyed) {
-            delete bullets[bId];
+            delete lobby.bullets[bId];
         }
     }
     
-    // Broadcast state to all clients
-    io.emit('gameStateUpdate', {
-        bullets: Object.values(bullets),
-        players: players // sending players syncs health, ammo, and isEliminated status
+    if (lobby.healingItems) {
+        const itemKeys = Object.keys(lobby.healingItems);
+        const playerKeys = Object.keys(lobby.players);
+
+        for (let i = 0; i < itemKeys.length; i++) {
+            const itemId = itemKeys[i];
+            const item = lobby.healingItems[itemId];
+            let itemConsumed = false;
+
+            for (let j = 0; j < playerKeys.length; j++) {
+                const pId = playerKeys[j];
+                const p = lobby.players[pId];
+
+                // Only active players can consume
+                if (p.isEliminated || !p.isPlaying) continue;
+
+                const dx = p.x - item.x;
+                const dy = p.y - item.y;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+
+                // Player radius is 15, item radius is 10
+                if (dist < 15 + item.radius) {
+                    p.health = 100;
+                    itemConsumed = true;
+                    break;
+                }
+            }
+
+            if (itemConsumed) {
+                delete lobby.healingItems[itemId];
+            }
+        }
+    }
+    
+    // Broadcast state to all clients in loop
+    io.to(lobbyId).emit('gameStateUpdate', {
+        bullets: Object.values(lobby.bullets),
+        players: lobby.players, // sending players syncs health, ammo, and isEliminated status
+        healingItems: lobby.healingItems ? Object.values(lobby.healingItems) : []
     });
 }
 
