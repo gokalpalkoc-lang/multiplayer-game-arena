@@ -23,10 +23,7 @@ app.get('/health', (req, res) => {
 const lobbies = {}; // Map of lobbyId -> lobbyData
 const playerLobbies = {}; // Map of socket.id -> lobbyId
 
-// We can still keep uploadedMaps global if maps are meant to be shared across all games
-const uploadedMaps = [
-    { name: "Default Arena", data: null } // null means no special map, use default canvas boundaries
-];
+// Global maps removed, map logic moved to be per-lobby
 
 let totalGamesPlayed = 0;
 
@@ -38,14 +35,14 @@ function broadcastLobbyState(lobbyId) {
     if (!lobby) return;
 
     // Tally votes to send to clients
-    const mapVotes = new Array(uploadedMaps.length).fill(0);
+    const mapVotes = new Array((lobby.uploadedMaps || []).length).fill(0);
     Object.values(lobby.players).forEach(p => {
-        if (p.votedMapIndex !== undefined && p.votedMapIndex >= 0 && p.votedMapIndex < uploadedMaps.length) {
+        if (p.votedMapIndex !== undefined && p.votedMapIndex >= 0 && p.votedMapIndex < lobby.uploadedMaps.length) {
             mapVotes[p.votedMapIndex]++;
         }
     });
 
-    const mapsWithVotes = uploadedMaps.map((m, index) => ({
+    const mapsWithVotes = (lobby.uploadedMaps || []).map((m, index) => ({
         name: m.name,
         votes: mapVotes[index],
         maxPlayers: m.data ? m.data.maxPlayers : undefined
@@ -92,7 +89,10 @@ io.on('connection', (socket) => {
             bullets: {},
             healingItems: {},
             gameLoopInterval: null,
-            currentMapData: null
+            currentMapData: null,
+            uploadedMaps: [
+                { name: "Default Arena", data: null }
+            ]
         };
         joinLobby(socket, lobbyId);
         broadcastActiveLobbies();
@@ -338,7 +338,7 @@ io.on('connection', (socket) => {
         if (lobby.gameState !== 'lobby') return;
         
         const lobbySize = Object.keys(lobby.players).length;
-        const targetMap = uploadedMaps[index];
+        const targetMap = lobby.uploadedMaps[index];
         
         if (targetMap && targetMap.data && targetMap.data.maxPlayers) {
             if (lobbySize > targetMap.data.maxPlayers) {
@@ -347,31 +347,55 @@ io.on('connection', (socket) => {
             }
         }
         
-        if (lobby.players[socket.id] && index >= 0 && index < uploadedMaps.length) {
+        if (lobby.players[socket.id] && index >= 0 && index < lobby.uploadedMaps.length) {
             lobby.players[socket.id].votedMapIndex = index;
             broadcastLobbyState(lobbyId);
         }
     });
 
-    socket.on('uploadMap', (mapJsonStr) => {
+    socket.on('uploadMap', (payload) => {
         const lobbyId = playerLobbies[socket.id];
         if (!lobbyId || !lobbies[lobbyId]) return;
         const lobby = lobbies[lobbyId];
 
         if (lobby.gameState !== 'lobby') return;
         try {
-            const mapObj = JSON.parse(mapJsonStr);
+            const mapObj = JSON.parse(payload.data);
             if (mapObj.data && mapObj.cols && mapObj.rows) {
-                uploadedMaps.push({
-                    name: `Custom Map ${uploadedMaps.length}`,
+                lobby.uploadedMaps.push({
+                    name: payload.name || `Custom Map ${lobby.uploadedMaps.length}`,
                     data: mapObj
                 });
-                // Broadcast to all active lobbies since maps are global
-                Object.keys(lobbies).forEach(id => broadcastLobbyState(id));
+                // Broadcast only to this lobby
+                broadcastLobbyState(lobbyId);
             }
         } catch (e) {
             console.error("Invalid map upload JSON from", socket.id);
         }
+    });
+
+    socket.on('deleteMap', (index) => {
+        const lobbyId = playerLobbies[socket.id];
+        if (!lobbyId || !lobbies[lobbyId]) return;
+        const lobby = lobbies[lobbyId];
+
+        if (lobby.gameState !== 'lobby') return;
+        
+        // Only creator can delete, and cannot delete default map (index 0)
+        if (lobby.creatorId !== socket.id || index <= 0 || index >= lobby.uploadedMaps.length) return;
+
+        lobby.uploadedMaps.splice(index, 1);
+        
+        // Reset votes for anyone who voted for the deleted map or shift indices
+        Object.values(lobby.players).forEach(p => {
+            if (p.votedMapIndex === index) {
+                p.votedMapIndex = undefined;
+            } else if (p.votedMapIndex > index) {
+                p.votedMapIndex--;
+            }
+        });
+
+        broadcastLobbyState(lobbyId);
     });
     
     function checkGameStart(lobbyId) {
@@ -414,9 +438,9 @@ io.on('connection', (socket) => {
                 });
                 
                 // Tally votes
-                let mapVotes = new Array(uploadedMaps.length).fill(0);
+                let mapVotes = new Array(lobby.uploadedMaps.length).fill(0);
                 Object.values(lobby.players).forEach(p => {
-                    if (p.votedMapIndex !== undefined && p.votedMapIndex >= 0 && p.votedMapIndex < uploadedMaps.length) {
+                    if (p.votedMapIndex !== undefined && p.votedMapIndex >= 0 && p.votedMapIndex < lobby.uploadedMaps.length) {
                         mapVotes[p.votedMapIndex]++;
                     }
                 });
@@ -424,12 +448,12 @@ io.on('connection', (socket) => {
                 // Find the maximum votes
                 let maxVotes = -1;
                 let topMaps = [];
-                for (let i = 0; i < uploadedMaps.length; i++) {
+                for (let i = 0; i < lobby.uploadedMaps.length; i++) {
                     if (mapVotes[i] > maxVotes) {
                         maxVotes = mapVotes[i];
-                        topMaps = [uploadedMaps[i]];
+                        topMaps = [lobby.uploadedMaps[i]];
                     } else if (mapVotes[i] === maxVotes) {
-                        topMaps.push(uploadedMaps[i]);
+                        topMaps.push(lobby.uploadedMaps[i]);
                     }
                 }
 
