@@ -57,7 +57,9 @@ function broadcastLobbyState(lobbyId) {
         creatorId: lobby.creatorId,
         players: lobby.players,
         maps: mapsWithVotes,
-        gameState: lobby.gameState
+        gameState: lobby.gameState,
+        gameMode: lobby.gameMode,
+        teamCount: lobby.teamCount
     });
 }
 function broadcastActiveLobbies() {
@@ -85,6 +87,8 @@ io.on('connection', (socket) => {
             creatorId: socket.id,
             players: {},
             gameState: 'lobby',
+            gameMode: 'ffa',
+            teamCount: 2,
             bullets: {},
             healingItems: {},
             gameLoopInterval: null,
@@ -119,6 +123,75 @@ io.on('connection', (socket) => {
         }
     });
 
+    socket.on('toggleGameMode', (newMode) => {
+        const lobbyId = playerLobbies[socket.id];
+        if (!lobbyId || !lobbies[lobbyId]) return;
+        const lobby = lobbies[lobbyId];
+        
+        if (lobby.creatorId === socket.id && (newMode === 'ffa' || newMode === 'tdm')) {
+            lobby.gameMode = newMode;
+            // When switching to TDM, assign everyone a team
+            if (newMode === 'tdm') {
+                 let tIdx = 0;
+                 const validTeams = ['red', 'blue', 'green', 'yellow'].slice(0, lobby.teamCount);
+                 Object.values(lobby.players).forEach(p => {
+                     p.team = validTeams[tIdx % lobby.teamCount];
+                     tIdx++;
+                 });
+            } else {
+                 Object.values(lobby.players).forEach(p => p.team = null);
+            }
+            broadcastLobbyState(lobbyId);
+        }
+    });
+
+    socket.on('changeTeamCount', (count) => {
+        const lobbyId = playerLobbies[socket.id];
+        if (!lobbyId || !lobbies[lobbyId]) return;
+        const lobby = lobbies[lobbyId];
+        
+        if (lobby.creatorId === socket.id && lobby.gameMode === 'tdm') {
+            const numCount = parseInt(count);
+            if (numCount >= 2 && numCount <= 4) {
+                lobby.teamCount = numCount;
+                
+                // Reassign teams if someone is on an invalid team
+                const validTeams = ['red', 'blue', 'green', 'yellow'].slice(0, lobby.teamCount);
+                let needsRebalance = false;
+                
+                Object.values(lobby.players).forEach(p => {
+                    if (!validTeams.includes(p.team)) {
+                        needsRebalance = true;
+                    }
+                });
+                
+                if (needsRebalance) {
+                    let tIdx = 0;
+                    Object.values(lobby.players).forEach(p => {
+                        p.team = validTeams[tIdx % lobby.teamCount];
+                        tIdx++;
+                    });
+                }
+                
+                broadcastLobbyState(lobbyId);
+            }
+        }
+    });
+
+    socket.on('changeTeam', (newTeam) => {
+        const lobbyId = playerLobbies[socket.id];
+        if (!lobbyId || !lobbies[lobbyId]) return;
+        const lobby = lobbies[lobbyId];
+        
+        if (lobby.gameState === 'lobby' && lobby.gameMode === 'tdm') {
+            const validTeams = ['red', 'blue', 'green', 'yellow'].slice(0, lobby.teamCount);
+            if (validTeams.includes(newTeam)) {
+                lobby.players[socket.id].team = newTeam;
+                broadcastLobbyState(lobbyId);
+            }
+        }
+    });
+
     function joinLobby(socket, lobbyId) {
         const lobby = lobbies[lobbyId];
         if (!lobby) return;
@@ -142,8 +215,33 @@ io.on('connection', (socket) => {
             weapon: 'pistol',
             isEliminated: false,
             isPlaying: false,
-            lastShotTime: 0
+            lastShotTime: 0,
+            team: null // Assigned when joining a TDM lobby
         };
+        
+        if (lobby.gameMode === 'tdm') {
+            // Find team with fewest members
+            const validTeams = ['red', 'blue', 'green', 'yellow'].slice(0, lobby.teamCount);
+            const teamCounts = {};
+            validTeams.forEach(t => teamCounts[t] = 0);
+            
+            Object.values(lobby.players).forEach(p => {
+                if (teamCounts[p.team] !== undefined) {
+                    teamCounts[p.team]++;
+                }
+            });
+            
+            let bestTeam = validTeams[0];
+            let minScore = 999;
+            validTeams.forEach(t => {
+                if (teamCounts[t] < minScore) {
+                    minScore = teamCounts[t];
+                    bestTeam = t;
+                }
+            });
+            
+            lobby.players[socket.id].team = bestTeam;
+        }
 
         // Notify them they joined
         socket.emit('lobbyJoined', lobbyId);
@@ -193,12 +291,20 @@ io.on('connection', (socket) => {
             broadcastLobbyState(lobbyId);
         } else if (lobby.gameState === 'playing') {
             const alivePlayers = Object.values(lobby.players).filter(pl => !pl.isEliminated && pl.isPlaying);
-            if (alivePlayers.length <= 1) {
-                let winnerId = null;
-                if (alivePlayers.length === 1) {
-                    winnerId = alivePlayers[0].id;
+            if (lobby.gameMode === 'tdm') {
+                const aliveTeams = new Set(alivePlayers.map(p => p.team));
+                if (aliveTeams.size <= 1) {
+                    let winnerTeam = aliveTeams.size === 1 ? aliveTeams.values().next().value : null;
+                    triggerGameOver(lobbyId, { winnerTeam: winnerTeam });
                 }
-                triggerGameOver(lobbyId, winnerId);
+            } else {
+                if (alivePlayers.length <= 1) {
+                    let winnerId = null;
+                    if (alivePlayers.length === 1) {
+                        winnerId = alivePlayers[0].id;
+                    }
+                    triggerGameOver(lobbyId, { winnerId: winnerId });
+                }
             }
         }
         
@@ -282,6 +388,9 @@ io.on('connection', (socket) => {
                 broadcastActiveLobbies();
                 
                 // Reset player stats for the new game
+                let tdmPlayers = [...playerKeys];
+                tdmPlayers.sort(() => Math.random() - 0.5);
+
                 playerKeys.forEach(id => {
                     lobby.players[id].health = 100;
                     lobby.players[id].ammo = 16;
@@ -291,6 +400,17 @@ io.on('connection', (socket) => {
                     lobby.players[id].isEliminated = false;
                     lobby.players[id].isPlaying = true;
                     lobby.players[id].lastShotTime = 0;
+                    
+                    if (lobby.gameMode === 'tdm') {
+                        // Keep their selected team, but assign their color
+                        if (lobby.players[id].team === 'red') lobby.players[id].color = '#ff4444';
+                        else if (lobby.players[id].team === 'blue') lobby.players[id].color = '#4466ff';
+                        else if (lobby.players[id].team === 'green') lobby.players[id].color = '#44ff44';
+                        else if (lobby.players[id].team === 'yellow') lobby.players[id].color = '#ffff44';
+                    } else {
+                        lobby.players[id].team = null;
+                        lobby.players[id].color = `hsl(${Math.random() * 360}, 100%, 50%)`;
+                    }
                 });
                 
                 // Tally votes
@@ -432,6 +552,7 @@ io.on('connection', (socket) => {
                 vx: nX * BULLET_SPEED,
                 vy: nY * BULLET_SPEED,
                 ownerId: socket.id,
+                team: player.team,
                 radius: isRevolver ? 2 : 4
             };
         }
@@ -483,11 +604,11 @@ io.on('connection', (socket) => {
     });
 });
 
-function triggerGameOver(lobbyId, winnerId) {
+function triggerGameOver(lobbyId, result) {
     const lobby = lobbies[lobbyId];
     if (!lobby || lobby.gameState !== 'playing') return;
 
-    io.to(lobbyId).emit('gameOver', { winnerId: winnerId });
+    io.to(lobbyId).emit('gameOver', result);
     stopGameLoop(lobbyId);
     lobby.gameState = 'gameover'; // Prevent multiple triggers
     broadcastActiveLobbies();
@@ -577,6 +698,9 @@ function updatePhysics(lobbyId) {
                 // Don't hit owner or eliminated players
                 if (pId === b.ownerId || p.isEliminated) continue;
                 
+                // Do not allow friendly fire in TDM
+                if (lobby.gameMode === 'tdm' && p.team === b.team && b.team != null) continue;
+                
                 // Simple circle collision (player approx 30x30, radius 15)
                 const dx = p.x - b.x;
                 const dy = p.y - b.y;
@@ -604,12 +728,20 @@ function updatePhysics(lobbyId) {
                         
                         // Check if game over? 
                         const alivePlayers = Object.values(lobby.players).filter(pl => !pl.isEliminated && pl.isPlaying);
-                        if (alivePlayers.length <= 1) {
-                            let winnerId = null;
-                            if (alivePlayers.length === 1) {
-                                winnerId = alivePlayers[0].id;
+                        if (lobby.gameMode === 'tdm') {
+                            const aliveTeams = new Set(alivePlayers.map(p => p.team));
+                            if (aliveTeams.size <= 1) {
+                                let winnerTeam = aliveTeams.size === 1 ? aliveTeams.values().next().value : null;
+                                triggerGameOver(lobbyId, { winnerTeam: winnerTeam });
                             }
-                            triggerGameOver(lobbyId, winnerId);
+                        } else {
+                            if (alivePlayers.length <= 1) {
+                                let winnerId = null;
+                                if (alivePlayers.length === 1) {
+                                    winnerId = alivePlayers[0].id;
+                                }
+                                triggerGameOver(lobbyId, { winnerId: winnerId });
+                            }
                         }
                     }
                     break;
