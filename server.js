@@ -87,7 +87,7 @@ io.on('connection', (socket) => {
             gameMode: 'ffa',
             teamCount: 2,
             bullets: {},
-            healingItems: {},
+            items: {}, // generic power-ups
             gameLoopInterval: null,
             currentMapData: null,
             uploadedMaps: [
@@ -216,7 +216,11 @@ io.on('connection', (socket) => {
             isEliminated: false,
             isPlaying: false,
             lastShotTime: 0,
-            team: null // Assigned when joining a TDM lobby
+            team: null, // Assigned when joining a TDM lobby
+            speedBootsUntil: 0,
+            rapidFireUntil: 0,
+            armorCount: 0,
+            isHidden: false
         };
         
         if (lobby.gameMode === 'tdm') {
@@ -407,7 +411,7 @@ io.on('connection', (socket) => {
             if (allReady) {
                 // All are ready! Start the game.
                 lobby.gameState = 'playing';
-                lobby.healingItems = {};
+                lobby.items = {}; // Replaced healingItems with items
                 totalGamesPlayed++;
                 broadcastActiveLobbies();
                 
@@ -424,6 +428,10 @@ io.on('connection', (socket) => {
                     lobby.players[id].isEliminated = false;
                     lobby.players[id].isPlaying = true;
                     lobby.players[id].lastShotTime = 0;
+                    lobby.players[id].speedBootsUntil = 0;
+                    lobby.players[id].rapidFireUntil = 0;
+                    lobby.players[id].armorCount = 0;
+                    lobby.players[id].isHidden = false;
                     
                     if (lobby.gameMode === 'tdm') {
                         // Keep their selected team, but assign their color
@@ -463,14 +471,26 @@ io.on('connection', (socket) => {
 
                 // Parse map for start positions
                 if (chosenMap && chosenMap.data) {
-                    lobby.currentMapData = chosenMap.data;
-                    const tileSize = chosenMap.data.tileSize || 50;
-                    const mapGrid = chosenMap.data.data;
+                    // DEEP COPY the map so destructible walls destroyed don't persist
+                    lobby.currentMapData = JSON.parse(JSON.stringify(chosenMap.data));
+                    const tileSize = lobby.currentMapData.tileSize || 50;
+                    const mapGrid = lobby.currentMapData.data;
                     const pKeys = Object.keys(lobby.players);
                     
-                    if (chosenMap.data.playerStarts && chosenMap.data.playerStarts.length > 0) {
+                    // Initialize block array for destructible walls
+                    lobby.blockHealth = [];
+                    for (let r = 0; r < lobby.currentMapData.rows; r++) {
+                        lobby.blockHealth[r] = new Array(lobby.currentMapData.cols).fill(0);
+                        for (let c = 0; c < lobby.currentMapData.cols; c++) {
+                            if (mapGrid[r][c] === 3) {
+                                lobby.blockHealth[r][c] = 100; // 100 health per block
+                            }
+                        }
+                    }
+                    
+                    if (lobby.currentMapData.playerStarts && lobby.currentMapData.playerStarts.length > 0) {
                         // New format: sequential array
-                        const starts = chosenMap.data.playerStarts;
+                        const starts = lobby.currentMapData.playerStarts;
                         pKeys.forEach((pid, index) => {
                             if (index < starts.length) {
                                 lobby.players[pid].x = starts[index].c * tileSize + tileSize / 2;
@@ -482,8 +502,8 @@ io.on('connection', (socket) => {
                         let p1Spawned = false;
                         let p2Spawned = false;
 
-                        for (let r = 0; r < chosenMap.data.rows; r++) {
-                            for (let c = 0; c < chosenMap.data.cols; c++) {
+                        for (let r = 0; r < lobby.currentMapData.rows; r++) {
+                            for (let c = 0; c < lobby.currentMapData.cols; c++) {
                                 if (mapGrid[r][c] === 2 && !p1Spawned && pKeys[0]) {
                                     lobby.players[pKeys[0]].x = c * tileSize + tileSize / 2;
                                     lobby.players[pKeys[0]].y = r * tileSize + tileSize / 2;
@@ -537,7 +557,13 @@ io.on('connection', (socket) => {
         const now = Date.now();
         const isRevolver = player.weapon === 'revolver';
         const currentAmmo = isRevolver ? player.revolverAmmo : player.ammo;
-        const fireRate = 40; 
+        let fireRate = 400; // pistol base fire rate
+        if (isRevolver) {
+            fireRate = 800;
+        }
+        if (now < player.rapidFireUntil) {
+            fireRate = 100; // very fast fire rate
+        }
 
         if (currentAmmo > 0 && !player.isReloading && (now - player.lastShotTime >= fireRate)) {
             if (isRevolver) {
@@ -641,7 +667,7 @@ function triggerGameOver(lobbyId, result) {
     setTimeout(() => {
         if (!lobbies[lobbyId]) return;
         lobby.gameState = 'lobby';
-        lobby.healingItems = {};
+        lobby.items = {}; // Reset items
         Object.values(lobby.players).forEach(p => {
             p.isReady = false;
             p.health = 100;
@@ -651,6 +677,10 @@ function triggerGameOver(lobbyId, result) {
             p.isReloading = false;
             p.isEliminated = false;
             p.isPlaying = false;
+            p.speedBootsUntil = 0;
+            p.rapidFireUntil = 0;
+            p.armorCount = 0;
+            p.isHidden = false;
         });
         broadcastLobbyState(lobbyId);
         broadcastActiveLobbies();
@@ -669,6 +699,10 @@ function startGameLoop(lobbyId) {
     lobby.gameLoopInterval = setInterval(() => {
         updatePhysics(lobbyId);
     }, 1000 / 60);
+
+    // Initial spawner setup
+    lobby.lastItemSpawnTime = Date.now();
+    // Spawner handles random item drops periodically
 }
 
 function stopGameLoop(lobbyId) {
@@ -706,8 +740,18 @@ function updatePhysics(lobbyId) {
             const row = Math.floor(b.y / tileSize);
             
             if (row >= 0 && row < lobby.currentMapData.rows && col >= 0 && col < lobby.currentMapData.cols) {
-                if (lobby.currentMapData.data[row][col] === 1) { // 1 is a wall block
+                const tileType = lobby.currentMapData.data[row][col];
+                if (tileType === 1) { // 1 is a wall block
                     destroyed = true;
+                } else if (tileType === 3) { // 3 is destructible wall
+                    destroyed = true;
+                    if (lobby.blockHealth[row] && lobby.blockHealth[row][col] !== undefined) {
+                        lobby.blockHealth[row][col] -= 25;
+                        if (lobby.blockHealth[row][col] <= 0) {
+                            lobby.currentMapData.data[row][col] = 0; // turn into empty tile
+                            io.to(lobbyId).emit('mapUpdate', { row: row, col: col, type: 0 }); // Tell clients block is broken
+                        }
+                    }
                 }
             }
         }
@@ -732,21 +776,29 @@ function updatePhysics(lobbyId) {
                 
                 if (dist < 15 + b.radius) {
                     // Hit!
-                    p.health -= 25;
                     destroyed = true;
+                    if (p.armorCount > 0) {
+                        p.armorCount--;
+                    } else {
+                        p.health -= 25;
+                    }
                     
                     if (p.health <= 0) {
                         p.health = 0;
                         p.isEliminated = true;
                         io.to(lobbyId).emit('playerEliminated', pId);
                         
-                        // spawn a healing item
+                        // spawn a random item
                         const itemId = uuidv4();
-                        lobby.healingItems = lobby.healingItems || {};
-                        lobby.healingItems[itemId] = {
+                        lobby.items = lobby.items || {};
+                        const itemTypes = ['health', 'speed', 'armor', 'rapidfire'];
+                        const randomType = itemTypes[Math.floor(Math.random() * itemTypes.length)];
+                        
+                        lobby.items[itemId] = {
                             id: itemId,
                             x: p.x,
                             y: p.y,
+                            type: randomType,
                             radius: 10
                         };
                         
@@ -778,13 +830,13 @@ function updatePhysics(lobbyId) {
         }
     }
     
-    if (lobby.healingItems) {
-        const itemKeys = Object.keys(lobby.healingItems);
+    if (lobby.items) {
+        const itemKeys = Object.keys(lobby.items);
         const playerKeys = Object.keys(lobby.players);
 
         for (let i = 0; i < itemKeys.length; i++) {
             const itemId = itemKeys[i];
-            const item = lobby.healingItems[itemId];
+            const item = lobby.items[itemId];
             let itemConsumed = false;
 
             for (let j = 0; j < playerKeys.length; j++) {
@@ -800,23 +852,102 @@ function updatePhysics(lobbyId) {
 
                 // Player radius is 15, item radius is 10
                 if (dist < 15 + item.radius) {
-                    p.health = 100;
+                    if (item.type === 'health') {
+                        p.health = 100;
+                    } else if (item.type === 'speed') {
+                        p.speedBootsUntil = Date.now() + 10000; // 10 seconds
+                    } else if (item.type === 'armor') {
+                        p.armorCount = 2; // Absorbs 2 bullets
+                    } else if (item.type === 'rapidfire') {
+                        p.rapidFireUntil = Date.now() + 5000; // 5 seconds
+                    }
                     itemConsumed = true;
                     break;
                 }
             }
 
             if (itemConsumed) {
-                delete lobby.healingItems[itemId];
+                delete lobby.items[itemId];
             }
         }
     }
     
+    const now = Date.now();
+    // Periodic Item Spawner
+    if (now - lobby.lastItemSpawnTime > 15000) {
+        lobby.lastItemSpawnTime = now;
+        if (lobby.currentMapData && Object.keys(lobby.items).length < 10) { // cap items
+            const emptyTiles = [];
+            for (let r = 0; r < lobby.currentMapData.rows; r++) {
+                for (let c = 0; c < lobby.currentMapData.cols; c++) {
+                    if (lobby.currentMapData.data[r][c] === 0) {
+                        emptyTiles.push({r, c});
+                    }
+                }
+            }
+            if (emptyTiles.length > 0) {
+                const randTile = emptyTiles[Math.floor(Math.random() * emptyTiles.length)];
+                const tileSize = lobby.currentMapData.tileSize || 50;
+                
+                const itemId = uuidv4();
+                const itemTypes = ['health', 'speed', 'armor', 'rapidfire'];
+                const randomType = itemTypes[Math.floor(Math.random() * itemTypes.length)];
+                
+                lobby.items[itemId] = {
+                    id: itemId,
+                    x: randTile.c * tileSize + tileSize / 2,
+                    y: randTile.r * tileSize + tileSize / 2,
+                    type: randomType,
+                    radius: 10
+                };
+            }
+        }
+    }
+
+    // Process Stealth Logic
+    const playerKeys = Object.keys(lobby.players);
+    for (let j = 0; j < playerKeys.length; j++) {
+        const pId = playerKeys[j];
+        const p = lobby.players[pId];
+        
+        if (p.isEliminated || !p.isPlaying) continue;
+        
+        if (!p.lastX) p.lastX = p.x;
+        if (!p.lastY) p.lastY = p.y;
+        
+        const isMoving = Math.abs(p.x - p.lastX) > 1.0 || Math.abs(p.y - p.lastY) > 1.0;
+        p.lastX = p.x;
+        p.lastY = p.y;
+        
+        let inBush = false;
+        if (lobby.currentMapData) {
+            const tileSize = lobby.currentMapData.tileSize || 50;
+            const col = Math.floor(p.x / tileSize);
+            const row = Math.floor(p.y / tileSize);
+            if (row >= 0 && row < lobby.currentMapData.rows && col >= 0 && col < lobby.currentMapData.cols) {
+               if (lobby.currentMapData.data[row][col] === 4) {
+                   inBush = true;
+               }
+            }
+        }
+        
+        if (inBush && !isMoving) {
+            if (!p.stillTimer) p.stillTimer = now;
+            // hide after standing still for 500ms
+            if (now - p.stillTimer > 500) {
+                p.isHidden = true;
+            }
+        } else {
+            p.stillTimer = 0;
+            p.isHidden = false;
+        }
+    }
+
     // Broadcast state to all clients in loop
     io.to(lobbyId).emit('gameStateUpdate', {
         bullets: Object.values(lobby.bullets),
         players: lobby.players, // sending players syncs health, ammo, and isEliminated status
-        healingItems: lobby.healingItems ? Object.values(lobby.healingItems) : []
+        items: lobby.items ? Object.values(lobby.items) : []
     });
 }
 
