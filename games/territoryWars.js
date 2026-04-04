@@ -366,11 +366,92 @@ module.exports = function (io) {
         return spawns;
     }
 
+    // ─── Utility ────────────────────────────────────────────────
+    
+    function stampSpawn(lobby, pid, spawnPos) {
+        if (!spawnPos) return;
+        lobby.players[pid].spawned = true;
+        const pidx = lobby.players[pid].playerIndex;
+        const sx = spawnPos.x;
+        const sy = spawnPos.y;
+        for (let dy = -3; dy <= 3; dy++) {
+            for (let dx = -3; dx <= 3; dx++) {
+                if (dx * dx + dy * dy <= 10) { // circular-ish
+                    const px = sx + dx;
+                    const py = sy + dy;
+                    if (px >= 0 && px < GRID_W && py >= 0 && py < GRID_H) {
+                        const idx = py * GRID_W + px;
+                        if (lobby.terrain[idx] === 1) {
+                            lobby.grid[idx] = pidx;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    function demolishBuildingAt(lobby, idx, changedPixels) {
+        if (!lobby.buildings[idx]) return;
+        const hx = idx % GRID_W;
+        const hy = Math.Floor(idx / GRID_W);
+        let hitId = null;
+        for (const b of Object.values(lobby.buildingInstances || {})) {
+            if (hx >= b.x && hx < b.x + b.w && hy >= b.y && hy < b.y + b.h) {
+                hitId = b.id;
+                break;
+            }
+        }
+        if (hitId) {
+            const b = lobby.buildingInstances[hitId];
+            for (let dy = 0; dy < b.h; dy++) {
+                for (let dx = 0; dx < b.w; dx++) {
+                    const bx = b.x + dx;
+                    const by = b.y + dy;
+                    const bi = by * GRID_W + bx;
+                    if (lobby.buildings[bi]) {
+                        lobby.buildings[bi] = 0;
+                        changedPixels.push({ x: bx, y: by, owner: lobby.grid[bi], building: 0 });
+                    }
+                }
+            }
+            const p = Object.values(lobby.players).find(pl => pl.playerIndex === b.owner);
+            if (p && p.buildingCounts[b.type] > 0) p.buildingCounts[b.type]--;
+            if (p && b.type === 'house') p.maxTroops = Math.max(BASE_MAX_TROOPS, p.maxTroops - TROOPS_PER_HOUSE);
+            delete lobby.buildingInstances[hitId];
+        } else {
+             lobby.buildings[idx] = 0;
+        }
+    }
+
     // ─── Game Tick ───────────────────────────────────────────────
 
     function gameTick(lobbyId) {
         const lobby = lobbies[lobbyId];
-        if (!lobby || lobby.gameState !== 'playing') return;
+        if (!lobby) return;
+
+        if (lobby.gameState === 'starting') {
+            lobby.startCountdown--;
+            if (lobby.startCountdown <= 0) {
+                lobby.gameState = 'playing';
+                const playerIds = Object.keys(lobby.players);
+                const unspawned = playerIds.filter(pid => !lobby.players[pid].spawned);
+                if (unspawned.length > 0) {
+                    const spawns = selectSpawnLocations(lobby.terrain, unspawned.length);
+                    unspawned.forEach((pid, i) => {
+                        stampSpawn(lobby, pid, spawns[i]);
+                    });
+                }
+                recountPixels(lobby);
+                nsp.to(lobbyId).emit('gameStateUpdate', { gameState: 'playing' });
+                broadcastGameState(lobbyId);
+            } else if (lobby.tickCount % TICK_RATE === 0) {
+                nsp.to(lobbyId).emit('gameStateUpdate', { startCountdown: Math.ceil(lobby.startCountdown / TICK_RATE) });
+            }
+            lobby.tickCount++;
+            return;
+        }
+
+        if (lobby.gameState !== 'playing') return;
 
         lobby.tickCount++;
         const changedPixels = [];
@@ -457,7 +538,7 @@ module.exports = function (io) {
                     
                     if (lobby.buildings[idx] === 5) { // Fort
                         if (hasKaboom) {
-                            lobby.buildings[idx] = 0;
+                            demolishBuildingAt(lobby, idx, changedPixels);
                             lobby.grid[idx] = 0;
                             
                             const kaboom = survivingTroops.find(t => t.type === 'kaboom');
@@ -477,7 +558,7 @@ module.exports = function (io) {
                                     if (ex >= 0 && ex < GRID_W && ey >= 0 && ey < GRID_H) {
                                         const eidx = ey * GRID_W + ex;
                                         lobby.grid[eidx] = 0;
-                                        if (lobby.buildings[eidx]) lobby.buildings[eidx] = 0;
+                                        if (lobby.buildings[eidx]) demolishBuildingAt(lobby, eidx, changedPixels);
                                         changedPixels.push({ x: ex, y: ey, owner: 0, building: 0 });
                                     }
                                 }
@@ -487,8 +568,7 @@ module.exports = function (io) {
                         // Normal tile or non-fort building
                         lobby.grid[idx] = winnerOwner;
                         if (lobby.buildings[idx]) {
-                            // Demolish building
-                            lobby.buildings[idx] = 0;
+                            demolishBuildingAt(lobby, idx, changedPixels);
                         }
                         changedPixels.push({ x: idx % GRID_W, y: Math.floor(idx / GRID_W), owner: winnerOwner, building: 0 });
                     }
@@ -509,7 +589,7 @@ module.exports = function (io) {
                                      const eidx = ey * GRID_W + ex;
                                      if (lobby.terrain[eidx] === 1) {
                                         lobby.grid[eidx] = 0;
-                                        if (lobby.buildings[eidx]) lobby.buildings[eidx] = 0;
+                                        if (lobby.buildings[eidx]) demolishBuildingAt(lobby, eidx, changedPixels);
                                         changedPixels.push({ x: ex, y: ey, owner: 0, building: 0 });
                                      }
                                  }
@@ -589,17 +669,35 @@ module.exports = function (io) {
         house: 4,
         fort: 5
     };
+    
+    const BUILDING_SIZES = {
+        farm: { w: 2, h: 2 },
+        megafarm: { w: 4, h: 4 },
+        post: { w: 1, h: 1 },
+        house: { w: 2, h: 2 },
+        fort: { w: 3, h: 3 }
+    };
 
     function handleBuild(lobby, socket, data) {
         const player = lobby.players[socket.id];
         if (!player || player.eliminated) return;
         const { type, x, y } = data;
-        if (x < 0 || x >= GRID_W || y < 0 || y >= GRID_H) return;
-        
-        const idx = y * GRID_W + x;
-        if (lobby.terrain[idx] !== 1) return; // not land
-        if (lobby.grid[idx] !== player.playerIndex) return; // not owned
-        if (lobby.buildings[idx] !== 0) return; // already a building
+        const size = BUILDING_SIZES[type];
+        if (!size) return;
+        const { w, h } = size;
+
+        // Verify area
+        for (let dy = 0; dy < h; dy++) {
+            for (let dx = 0; dx < w; dx++) {
+                const nx = x + dx;
+                const ny = y + dy;
+                if (nx < 0 || nx >= GRID_W || ny < 0 || ny >= GRID_H) return;
+                const i = ny * GRID_W + nx;
+                if (lobby.terrain[i] !== 1) return; // not land
+                if (lobby.grid[i] !== player.playerIndex) return; // not owned
+                if (lobby.buildings[i] !== 0) return; // already a building
+            }
+        }
 
         const cost = COSTS[type];
         if (!cost) return;
@@ -618,15 +716,27 @@ module.exports = function (io) {
             return; // Not enough resources
         }
 
-        lobby.buildings[idx] = bType;
+        const bId = lobby.buildingIdCounter++;
+        lobby.buildingInstances[bId] = { id: bId, type, x, y, w, h, owner: player.playerIndex };
+
+        const changedPixels = [];
+        for (let dy = 0; dy < h; dy++) {
+            for (let dx = 0; dx < w; dx++) {
+                const nx = x + dx;
+                const ny = y + dy;
+                const i = ny * GRID_W + nx;
+                lobby.buildings[i] = bType;
+                changedPixels.push({ x: nx, y: ny, owner: player.playerIndex, building: bType });
+            }
+        }
+
         player.buildingCounts[type]++;
-        
         if (type === 'house') {
             player.maxTroops += TROOPS_PER_HOUSE;
         }
 
         recountPixels(lobby);
-        nsp.to(lobby.id).emit('pixelDelta', [{ x, y, owner: player.playerIndex, building: bType }]);
+        nsp.to(lobby.id).emit('pixelDelta', changedPixels);
         socket.emit('energyUpdate', { energy: player.energy, coins: player.coins });
     }
 
@@ -825,9 +935,7 @@ module.exports = function (io) {
         // Create ownership grid (0 = neutral)
         const grid = new Uint8Array(GRID_SIZE);
 
-        // Assign player indices and spawn locations
-        const spawns = selectSpawnLocations(terrain, playerIds.length);
-
+        // Assign player indices and initialize properties
         for (let i = 0; i < playerIds.length; i++) {
             const pid = playerIds[i];
             const pidx = i + 1; // 1-based player index
@@ -838,36 +946,20 @@ module.exports = function (io) {
             lobby.players[pid].maxTroops = BASE_MAX_TROOPS;
             lobby.players[pid].activeTroops = 0;
             lobby.players[pid].buildingCounts = { farm: 0, megafarm: 0, post: 0, house: 0, fort: 0 };
-
-            // Stamp starting area (5x5 cluster)
-            if (spawns[i]) {
-                const sx = spawns[i].x;
-                const sy = spawns[i].y;
-                for (let dy = -3; dy <= 3; dy++) {
-                    for (let dx = -3; dx <= 3; dx++) {
-                        if (dx * dx + dy * dy <= 10) { // circular-ish
-                            const px = sx + dx;
-                            const py = sy + dy;
-                            if (px >= 0 && px < GRID_W && py >= 0 && py < GRID_H) {
-                                const idx = py * GRID_W + px;
-                                if (terrain[idx] === 1) {
-                                    grid[idx] = pidx;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            lobby.players[pid].spawned = false;
         }
 
         lobby.terrain = terrain;
         lobby.grid = grid;
         lobby.buildings = new Uint8Array(GRID_SIZE);
+        lobby.buildingInstances = {};
+        lobby.buildingIdCounter = 1;
         lobby.troops = {};
         lobby.troopIdCounter = 1;
         lobby.tickCount = 0;
         lobby.timeRemaining = MATCH_DURATION;
-        lobby.gameState = 'playing';
+        lobby.gameState = 'starting';
+        lobby.startCountdown = 150; // 150 ticks = 10s
 
         recountPixels(lobby);
 
@@ -880,6 +972,7 @@ module.exports = function (io) {
             terrain: terrainArr,
             grid: gridArr,
             buildings: buildingsArr,
+            buildingInstances: Object.values(lobby.buildingInstances),
             gridW: GRID_W,
             gridH: GRID_H,
             mapKey: mapKey,
@@ -895,6 +988,8 @@ module.exports = function (io) {
                 }])
             ),
             timeRemaining: MATCH_DURATION,
+            startCountdown: 10,
+            gameState: 'starting'
         });
 
         broadcastActiveLobbies();
@@ -1024,12 +1119,74 @@ module.exports = function (io) {
             handleTrain(lobby, socket, data);
         });
 
-        socket.on('moveTroops', (data) => {
+        socket.on('commandTroops', (data) => {
             const lobbyId = playerLobbies[socket.id];
             if (!lobbyId || !lobbies[lobbyId]) return;
             const lobby = lobbies[lobbyId];
             if (lobby.gameState !== 'playing') return;
-            handleMoveTroops(lobby, socket, data);
+            const player = lobby.players[socket.id];
+            if (!player || player.eliminated) return;
+            const { troopIds, tx, ty } = data;
+            
+            if (!Array.isArray(troopIds)) return;
+            for (const tid of troopIds) {
+                const t = lobby.troops[tid];
+                if (t && t.owner === player.playerIndex) {
+                    t.tx = tx;
+                    t.ty = ty;
+                }
+            }
+        });
+
+        socket.on('selectSpawn', (data) => {
+            const lobbyId = playerLobbies[socket.id];
+            if (!lobbyId || !lobbies[lobbyId]) return;
+            const lobby = lobbies[lobbyId];
+            if (lobby.gameState !== 'starting') return;
+            
+            const player = lobby.players[socket.id];
+            if (!player || player.eliminated) return;
+            
+            const { x, y } = data;
+            if (x < 0 || x >= GRID_W || y < 0 || y >= GRID_H) return;
+            const idx = y * GRID_W + x;
+            if (lobby.terrain[idx] !== 1) return;
+            
+            // Check distance to other known spawns
+            let valid = true;
+            for (const p of Object.values(lobby.players)) {
+                if (p.id !== socket.id && p.spawnPos) {
+                    const dx = p.spawnPos.x - x;
+                    const dy = p.spawnPos.y - y;
+                    if (dx*dx + dy*dy < 64) { // 8 blocks
+                        valid = false;
+                        break;
+                    }
+                }
+            }
+            if (valid) {
+                player.spawnPos = { x, y };
+                stampSpawn(lobby, socket.id, player.spawnPos);
+                recountPixels(lobby);
+                broadcastGameState(lobbyId);
+                // Also broadcast delta so people immediately see the stamp
+                const changedPixels = [];
+                for (let dy = -3; dy <= 3; dy++) {
+                    for (let dx = -3; dx <= 3; dx++) {
+                        if (dx * dx + dy * dy <= 10) {
+                            const px = x + dx;
+                            const py = y + dy;
+                            if (px >= 0 && px < GRID_W && py >= 0 && py < GRID_H) {
+                                const didx = py * GRID_W + px;
+                                if (lobby.terrain[didx] === 1) {
+                                    changedPixels.push({ x: px, y: py, owner: player.playerIndex, building: 0 });
+                                }
+                            }
+                        }
+                    }
+                }
+                nsp.to(lobbyId).emit('pixelDelta', changedPixels);
+            }
         });
 
         socket.on('disconnect', () => {
