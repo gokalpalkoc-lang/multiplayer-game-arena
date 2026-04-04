@@ -87,6 +87,7 @@ module.exports = function(io) {
         if (!lobby) return;
 
         lobby.bullets = {};
+        lobby.frameCount = 0;
         if (lobby.gameLoopInterval) clearInterval(lobby.gameLoopInterval);
 
         lobby.gameLoopInterval = setInterval(() => {
@@ -355,11 +356,45 @@ module.exports = function(io) {
             }
         }
 
-        nsp.to(lobbyId).emit('gameStateUpdate', {
-            bullets: Object.values(lobby.bullets),
-            players: lobby.players,
-            items: lobby.items ? Object.values(lobby.items) : []
-        });
+        // Throttle network broadcast to every 3rd frame (~20 FPS)
+        // Physics still runs at 60 FPS for accuracy
+        lobby.frameCount = (lobby.frameCount || 0) + 1;
+        if (lobby.frameCount % 3 === 0) {
+            // Slim down bullet data — only send position and radius
+            const slimBullets = Object.values(lobby.bullets).map(b => ({
+                x: Math.round(b.x),
+                y: Math.round(b.y),
+                radius: b.radius
+            }));
+
+            // Slim down player data — only send fields that change during gameplay
+            const slimPlayers = {};
+            for (const id in lobby.players) {
+                const p = lobby.players[id];
+                slimPlayers[id] = {
+                    x: Math.round(p.x),
+                    y: Math.round(p.y),
+                    health: p.health,
+                    ammo: p.ammo,
+                    revolverAmmo: p.revolverAmmo,
+                    weapon: p.weapon,
+                    isEliminated: p.isEliminated,
+                    isReloading: p.isReloading,
+                    team: p.team,
+                    facingRight: p.facingRight,
+                    speedBootsUntil: p.speedBootsUntil,
+                    rapidFireUntil: p.rapidFireUntil,
+                    armorCount: p.armorCount,
+                    isHidden: p.isHidden
+                };
+            }
+
+            nsp.to(lobbyId).emit('gameStateUpdate', {
+                bullets: slimBullets,
+                players: slimPlayers,
+                items: lobby.items ? Object.values(lobby.items) : []
+            });
+        }
     }
 
     nsp.on('connection', (socket) => {

@@ -811,8 +811,8 @@ module.exports = function (io) {
             id: t.id,
             type: t.type,
             owner: t.owner,
-            x: t.x,
-            y: t.y,
+            x: Math.round(t.x * 10) / 10,
+            y: Math.round(t.y * 10) / 10,
             tx: t.tx,
             ty: t.ty
         }));

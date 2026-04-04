@@ -9,7 +9,15 @@ const io = new Server(server, {
     cors: {
         origin: "*",
         methods: ["GET", "POST"]
-    }
+    },
+    // Performance: compress WebSocket messages to reduce bandwidth
+    perMessageDeflate: {
+        threshold: 256, // only compress messages > 256 bytes
+        zlibDeflateOptions: { level: 1 }, // fast compression (level 1)
+    },
+    // Faster disconnect detection
+    pingInterval: 10000,
+    pingTimeout: 5000,
 });
 
 // Serve the homepage / shared assets from public root

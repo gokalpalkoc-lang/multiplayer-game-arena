@@ -104,6 +104,7 @@ module.exports = function(io) {
         const lobby = lobbies[lobbyId];
         if (!lobby) return;
         if (lobby.gameLoopInterval) clearInterval(lobby.gameLoopInterval);
+        lobby.frameCount = 0;
 
         lobby.gameLoopInterval = setInterval(() => {
             updatePhysics(lobbyId);
@@ -223,23 +224,27 @@ module.exports = function(io) {
             }
         }
 
-        // Broadcast state
-        const gameState = {};
-        for (const pId of playerKeys) {
-            const p = lobby.players[pId];
-            gameState[pId] = {
-                x: p.x,
-                y: p.y,
-                angle: p.angle,
-                speed: p.speed,
-                lap: p.lap,
-                nextCheckpoint: p.nextCheckpoint,
-                finished: p.finished,
-                color: p.color
-            };
-        }
+        // Throttle broadcast to every 3rd frame (~20 FPS)
+        // Physics still runs at 60 FPS for accuracy
+        lobby.frameCount = (lobby.frameCount || 0) + 1;
+        if (lobby.frameCount % 3 === 0) {
+            const gameState = {};
+            for (const pId of playerKeys) {
+                const p = lobby.players[pId];
+                gameState[pId] = {
+                    x: Math.round(p.x * 10) / 10,
+                    y: Math.round(p.y * 10) / 10,
+                    angle: Math.round(p.angle * 100) / 100,
+                    speed: Math.round(p.speed * 100) / 100,
+                    lap: p.lap,
+                    nextCheckpoint: p.nextCheckpoint,
+                    finished: p.finished,
+                    color: p.color
+                };
+            }
 
-        nsp.to(lobbyId).emit('gameStateUpdate', gameState);
+            nsp.to(lobbyId).emit('gameStateUpdate', gameState);
+        }
     }
 
     function triggerGameOver(lobbyId) {
