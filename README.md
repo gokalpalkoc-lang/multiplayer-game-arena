@@ -1,9 +1,8 @@
-# Multiplayer 2D Game Template
-
+# Counter-Stride
 A simple boilerplate for building 2D multiplayer games in the browser using HTML5 Canvas, modern aesthetics, Node.js, Express, and Socket.IO. 
 
 ## Getting Started
-
+(cd C:\Users\tahag\.gemini\antigravity\scratch\multiplayer-game)
 1. Open your terminal in this directory.
 2. Run `npm install` to install dependencies.
 3. Run `npm start` to start the local game server.
@@ -17,5 +16,3 @@ A simple boilerplate for building 2D multiplayer games in the browser using HTML
 - `public/index.html`: The markup containing the HTML5 Canvas element.
 - `public/style.css`: The CSS adding an aesthetic and responsive dark-mode look.
 - `public/game.js`: The frontend client managing input, connecting to Socket.IO, and rendering to the screen.
-
-Have fun building your game!
