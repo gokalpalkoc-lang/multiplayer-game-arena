@@ -1145,7 +1145,7 @@ module.exports = function (io) {
             if (lobby.gameState !== 'starting') return;
             
             const player = lobby.players[socket.id];
-            if (!player || player.eliminated) return;
+            if (!player || player.eliminated || player.spawnPos) return;
             
             const { x, y } = data;
             if (x < 0 || x >= GRID_W || y < 0 || y >= GRID_H) return;
@@ -1228,30 +1228,52 @@ module.exports = function (io) {
             if (!lobbyId || !lobbies[lobbyId]) return;
 
             const lobby = lobbies[lobbyId];
+            
+            // Capture player index before removing the player record
+            const pidx = lobby.players[sock.id] ? lobby.players[sock.id].playerIndex : null;
+
             delete lobby.players[sock.id];
             delete playerLobbies[sock.id];
 
             sock.leave(lobbyId);
             sock.emit('lobbyLeft');
 
-            // If in game, clear player's pixels to neutral
-            if (lobby.gameState === 'playing' && lobby.grid) {
-                const pidx = lobby.players[sock.id]?.playerIndex;
-                if (pidx) {
-                    const changedPixels = [];
-                    for (let i = 0; i < GRID_SIZE; i++) {
-                        if (lobby.grid[i] === pidx) {
-                            lobby.grid[i] = 0;
-                            changedPixels.push({
-                                x: i % GRID_W,
-                                y: Math.floor(i / GRID_W),
-                                owner: 0,
-                            });
+            // If in game, clear player's pixels, troops, and buildings
+            if ((lobby.gameState === 'playing' || lobby.gameState === 'starting') && lobby.grid && pidx) {
+                const changedPixels = [];
+                for (let i = 0; i < GRID_SIZE; i++) {
+                    if (lobby.grid[i] === pidx) {
+                        lobby.grid[i] = 0;
+                        lobby.buildings[i] = 0; // Clear building layer too
+                        changedPixels.push({
+                            x: i % GRID_W,
+                            y: Math.floor(i / GRID_W),
+                            owner: 0,
+                            building: 0
+                        });
+                    }
+                }
+                
+                // Clear building instances
+                if (lobby.buildingInstances) {
+                    for (const bId in lobby.buildingInstances) {
+                        if (lobby.buildingInstances[bId].owner === pidx) {
+                            delete lobby.buildingInstances[bId];
                         }
                     }
-                    if (changedPixels.length > 0) {
-                        nsp.to(lobbyId).emit('pixelDelta', changedPixels);
+                }
+                
+                // Clear troops
+                if (lobby.troops) {
+                    for (const tId in lobby.troops) {
+                        if (lobby.troops[tId].owner === pidx) {
+                            delete lobby.troops[tId];
+                        }
                     }
+                }
+
+                if (changedPixels.length > 0) {
+                    nsp.to(lobbyId).emit('pixelDelta', changedPixels);
                 }
             }
 
