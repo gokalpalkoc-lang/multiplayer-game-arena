@@ -619,7 +619,7 @@ module.exports = function (io) {
             }
 
             const remaining = playerIds.filter(id => !lobby.players[id].eliminated);
-            if (remaining.length <= 1 && playerIds.length >= 2) {
+            if (remaining.length <= 1 && lobby.initialPlayerCount >= 2) {
                 endGame(lobbyId, 'elimination');
                 return;
             }
@@ -820,7 +820,10 @@ module.exports = function (io) {
         nsp.to(lobbyId).emit('gameStateUpdate', {
             players: playerStates,
             timeRemaining: lobby.timeRemaining,
-            troops: troopsData
+            troops: troopsData,
+            buildings: Object.values(lobby.buildingInstances || {}),
+            startCountdown: Math.ceil((lobby.startCountdown || 0) / TICK_RATE),
+            gameState: lobby.gameState
         });
     }
 
@@ -960,6 +963,7 @@ module.exports = function (io) {
         lobby.timeRemaining = MATCH_DURATION;
         lobby.gameState = 'starting';
         lobby.startCountdown = 150; // 150 ticks = 10s
+        lobby.initialPlayerCount = playerIds.length;
 
         recountPixels(lobby);
 
