@@ -393,7 +393,7 @@ module.exports = function (io) {
     function demolishBuildingAt(lobby, idx, changedPixels) {
         if (!lobby.buildings[idx]) return;
         const hx = idx % GRID_W;
-        const hy = Math.Floor(idx / GRID_W);
+        const hy = Math.floor(idx / GRID_W);
         let hitId = null;
         for (const b of Object.values(lobby.buildingInstances || {})) {
             if (hx >= b.x && hx < b.x + b.w && hy >= b.y && hy < b.y + b.h) {

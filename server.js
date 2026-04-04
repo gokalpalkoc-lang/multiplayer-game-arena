@@ -20,6 +20,9 @@ app.get('/health', (req, res) => {
     res.status(200).send('OK');
 });
 
+// Ignore favicon to prevent 404 errors
+app.get('/favicon.ico', (req, res) => res.status(204).end());
+
 // --- Register Game Modules ---
 // Each game module receives the io instance and sets up its own namespace
 require('./games/counterStride')(io);
