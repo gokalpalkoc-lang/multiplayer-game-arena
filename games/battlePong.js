@@ -98,7 +98,7 @@ module.exports = function(io) {
 
         lobby.gameLoopInterval = setInterval(() => {
             updatePhysics(lobbyId);
-        }, 1000 / 60);
+        }, 1000 / 45);
 
         lobby.lastPowerUpTime = Date.now();
     }
@@ -125,11 +125,22 @@ module.exports = function(io) {
             const maxPos = isVertical ? GAME_HEIGHT : GAME_WIDTH;
             const halfPaddle = (p.paddleLength || PADDLE_LENGTH) / 2;
 
-            if (p.input.up) {
-                p.paddlePos -= PADDLE_SPEED;
-            }
-            if (p.input.down) {
-                p.paddlePos += PADDLE_SPEED;
+            if (isVertical) {
+                // Left/right paddles move up/down with W/S
+                if (p.input.up) {
+                    p.paddlePos -= PADDLE_SPEED;
+                }
+                if (p.input.down) {
+                    p.paddlePos += PADDLE_SPEED;
+                }
+            } else {
+                // Top/bottom paddles move left/right with A/D
+                if (p.input.left) {
+                    p.paddlePos -= PADDLE_SPEED;
+                }
+                if (p.input.right) {
+                    p.paddlePos += PADDLE_SPEED;
+                }
             }
 
             p.paddlePos = Math.max(halfPaddle + 10, Math.min(maxPos - halfPaddle - 10, p.paddlePos));
@@ -315,24 +326,27 @@ module.exports = function(io) {
 
         lobby.balls = balls;
 
-        // Broadcast state
-        const paddleStates = {};
-        for (const pId of playerKeys) {
-            const p = players[pId];
-            paddleStates[pId] = {
-                paddlePos: p.paddlePos,
-                paddleLength: p.paddleLength || PADDLE_LENGTH,
-                side: p.side,
-                color: p.color,
-                score: p.score
-            };
-        }
+        // Broadcast state (throttled — only send every 2nd frame)
+        lobby.frameCount = (lobby.frameCount || 0) + 1;
+        if (lobby.frameCount % 2 === 0) {
+            const paddleStates = {};
+            for (const pId of playerKeys) {
+                const p = players[pId];
+                paddleStates[pId] = {
+                    paddlePos: Math.round(p.paddlePos),
+                    paddleLength: p.paddleLength || PADDLE_LENGTH,
+                    side: p.side,
+                    color: p.color,
+                    score: p.score
+                };
+            }
 
-        nsp.to(lobbyId).emit('gameStateUpdate', {
-            paddles: paddleStates,
-            balls: balls.map(b => ({ x: b.x, y: b.y, vx: b.vx, vy: b.vy, radius: b.radius })),
-            powerUps: lobby.powerUps || []
-        });
+            nsp.to(lobbyId).emit('gameStateUpdate', {
+                paddles: paddleStates,
+                balls: balls.map(b => ({ x: Math.round(b.x * 10) / 10, y: Math.round(b.y * 10) / 10, vx: Math.round(b.vx * 100) / 100, vy: Math.round(b.vy * 100) / 100, radius: b.radius })),
+                powerUps: lobby.powerUps || []
+            });
+        }
     }
 
     nsp.on('connection', (socket) => {
@@ -408,7 +422,9 @@ module.exports = function(io) {
             if (lobby.players[socket.id] && lobby.gameState === 'playing') {
                 lobby.players[socket.id].input = {
                     up: !!inputData.up,
-                    down: !!inputData.down
+                    down: !!inputData.down,
+                    left: !!inputData.left,
+                    right: !!inputData.right
                 };
             }
         });
@@ -438,7 +454,7 @@ module.exports = function(io) {
                 paddleLength: PADDLE_LENGTH,
                 isReady: false,
                 score: 0,
-                input: { up: false, down: false }
+                input: { up: false, down: false, left: false, right: false }
             };
 
             socket.emit('lobbyJoined', lobbyId);

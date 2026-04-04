@@ -26,12 +26,12 @@ module.exports = function(io) {
         startLine: { x1: 400, y1: 50, x2: 400, y2: 160 },
         // Start positions for players
         startPositions: [
-            { x: 350, y: 100, angle: 0 },
-            { x: 350, y: 130, angle: 0 },
-            { x: 300, y: 100, angle: 0 },
-            { x: 300, y: 130, angle: 0 },
-            { x: 250, y: 100, angle: 0 },
-            { x: 250, y: 130, angle: 0 }
+            { x: 350, y: 100, angle: Math.PI / 2 },
+            { x: 350, y: 130, angle: Math.PI / 2 },
+            { x: 300, y: 100, angle: Math.PI / 2 },
+            { x: 300, y: 130, angle: Math.PI / 2 },
+            { x: 250, y: 100, angle: Math.PI / 2 },
+            { x: 250, y: 130, angle: Math.PI / 2 }
         ],
         totalLaps: 3
     };
@@ -149,8 +149,8 @@ module.exports = function(io) {
             const prevX = p.x;
             const prevY = p.y;
 
-            p.x += Math.cos(p.angle) * p.speed;
-            p.y += Math.sin(p.angle) * p.speed;
+            p.x += Math.sin(p.angle) * p.speed;
+            p.y += -Math.cos(p.angle) * p.speed;
 
             // Off-track penalty — slow down
             if (!isOnTrack(p.x, p.y)) {
