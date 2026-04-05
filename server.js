@@ -37,8 +37,9 @@ require('./games/counterStride')(io);
 require('./games/pixelKart')(io);
 require('./games/battlePong')(io);
 require('./games/territoryWars')(io);
+require('./games/coopPuzzle')(io);
 
-console.log('Game modules loaded: Counter-Stride, Pixel Kart, Battle Pong, Territory Wars');
+console.log('Game modules loaded: Counter-Stride, Pixel Kart, Battle Pong, Territory Wars, Co-op Puzzle');
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, '0.0.0.0', () => {
