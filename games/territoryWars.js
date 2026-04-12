@@ -2,6 +2,7 @@ const { v4: uuidv4 } = require('uuid');
 
 module.exports = function (io) {
     const nsp = io.of('/territory-wars');
+    const arenaDB = io.arenaDB;
 
     const lobbies = {};
     const playerLobbies = {};
@@ -856,6 +857,19 @@ module.exports = function (io) {
 
         nsp.to(lobbyId).emit('gameOver', { results, reason });
         broadcastActiveLobbies();
+
+        // Award coins based on territory percentage
+        if (arenaDB) {
+            results.forEach((r, i) => {
+                const username = io.getUsernameBySocketId ? io.getUsernameBySocketId(r.id) : null;
+                if (!username) return;
+                const isWinner = i === 0;
+                const baseCoins = Math.max(5, Math.round(r.percentage * 0.5));
+                const totalCoins = isWinner ? baseCoins + 25 : baseCoins;
+                arenaDB.awardCoins(username, totalCoins, isWinner ? 'Territory Dominance' : 'Territory Claimed', 'territory-wars');
+                arenaDB.recordGameResult(username, 'territory-wars', isWinner, { bestScore: r.percentage });
+            });
+        }
 
         setTimeout(() => {
             if (!lobbies[lobbyId]) return;

@@ -2,6 +2,7 @@ const { v4: uuidv4 } = require('uuid');
 
 module.exports = function(io) {
     const nsp = io.of('/counter-stride');
+    const arenaDB = io.arenaDB;
 
     const lobbies = {};
     const playerLobbies = {};
@@ -57,6 +58,23 @@ module.exports = function(io) {
         stopGameLoop(lobbyId);
         lobby.gameState = 'gameover';
         broadcastActiveLobbies();
+
+        // Award coins for game results
+        if (arenaDB) {
+            const playerIds = Object.keys(lobby.players);
+            playerIds.forEach(pid => {
+                const username = io.getUsernameBySocketId ? io.getUsernameBySocketId(pid) : null;
+                if (!username) return;
+                const isWinner = result.winnerId === pid || (result.winnerTeam && lobby.players[pid].team === result.winnerTeam);
+                if (isWinner) {
+                    arenaDB.awardCoins(username, 25, 'Match Win', 'counter-stride');
+                    arenaDB.recordGameResult(username, 'counter-stride', true);
+                } else {
+                    arenaDB.awardCoins(username, 10, 'Match Played', 'counter-stride');
+                    arenaDB.recordGameResult(username, 'counter-stride', false);
+                }
+            });
+        }
 
         setTimeout(() => {
             if (!lobbies[lobbyId]) return;
@@ -172,6 +190,14 @@ module.exports = function(io) {
                             p.health = 0;
                             p.isEliminated = true;
                             nsp.to(lobbyId).emit('playerEliminated', pId);
+
+                            // Award coins for the kill
+                            if (arenaDB) {
+                                const killerName = io.getUsernameBySocketId ? io.getUsernameBySocketId(b.ownerId) : null;
+                                if (killerName) {
+                                    arenaDB.awardCoins(killerName, 5, 'Elimination', 'counter-stride');
+                                }
+                            }
 
                             const itemId = uuidv4();
                             lobby.items = lobby.items || {};

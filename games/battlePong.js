@@ -2,6 +2,7 @@ const { v4: uuidv4 } = require('uuid');
 
 module.exports = function(io) {
     const nsp = io.of('/battle-pong');
+    const arenaDB = io.arenaDB;
 
     const lobbies = {};
     const playerLobbies = {};
@@ -257,6 +258,17 @@ module.exports = function(io) {
                     stopGameLoop(lobbyId);
                     lobby.gameState = 'gameover';
                     broadcastActiveLobbies();
+
+                    // Award coins — position 1 = winner (lowest score)
+                    if (arenaDB) {
+                        results.forEach((r, i) => {
+                            const username = io.getUsernameBySocketId ? io.getUsernameBySocketId(r.id) : null;
+                            if (!username) return;
+                            const isWinner = i === 0;
+                            arenaDB.awardCoins(username, isWinner ? 20 : 10, isWinner ? 'Match Win' : 'Match Played', 'battle-pong');
+                            arenaDB.recordGameResult(username, 'battle-pong', isWinner);
+                        });
+                    }
 
                     setTimeout(() => {
                         if (!lobbies[lobbyId]) return;

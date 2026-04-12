@@ -2,6 +2,7 @@ const { v4: uuidv4 } = require('uuid');
 
 module.exports = function(io) {
     const nsp = io.of('/pixel-kart');
+    const arenaDB = io.arenaDB;
 
     const lobbies = {};
     const playerLobbies = {};
@@ -270,6 +271,19 @@ module.exports = function(io) {
         stopGameLoop(lobbyId);
         lobby.gameState = 'gameover';
         broadcastActiveLobbies();
+
+        // Award coins based on finishing position
+        if (arenaDB) {
+            const coinRewards = [30, 20, 15, 10, 10, 10];
+            results.forEach((r, i) => {
+                const username = io.getUsernameBySocketId ? io.getUsernameBySocketId(r.id) : null;
+                if (!username) return;
+                const coins = coinRewards[i] || 10;
+                const isWinner = i === 0;
+                arenaDB.awardCoins(username, coins, isWinner ? '1st Place' : `Finished #${i + 1}`, 'pixel-kart');
+                arenaDB.recordGameResult(username, 'pixel-kart', isWinner);
+            });
+        }
 
         setTimeout(() => {
             if (!lobbies[lobbyId]) return;

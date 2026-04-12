@@ -2,6 +2,7 @@ const { v4: uuidv4 } = require('uuid');
 
 module.exports = function (io) {
     const nsp = io.of('/coop-puzzle');
+    const arenaDB = io.arenaDB;
 
     const lobbies = {};
     const playerLobbies = {};
@@ -677,6 +678,16 @@ module.exports = function (io) {
                     levelName: level.name
                 });
                 stopGameLoop(lobbyId);
+
+                // Award coins for level completion
+                if (arenaDB) {
+                    stillAlive.forEach(pid => {
+                        const username = io.getUsernameBySocketId ? io.getUsernameBySocketId(pid) : null;
+                        if (!username) return;
+                        arenaDB.awardCoins(username, 15, 'Level Complete', 'coop-puzzle');
+                        arenaDB.recordGameResult(username, 'coop-puzzle', true, { levelCompleted: true });
+                    });
+                }
 
                 // Return to lobby after 5s
                 setTimeout(() => {
