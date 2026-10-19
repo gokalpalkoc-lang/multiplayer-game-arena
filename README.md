@@ -1,42 +1,57 @@
 # Multiplayer Game Arena
 
-A comprehensive platform for 2D multiplayer browser games built with HTML5 Canvas, Node.js, Express, and Socket.IO. The platform features a responsive, aesthetic design and hosts multiple distinct game modes.
+The game server behind **[Game Arena](http://gokalp.alkoc.net)**, a hub of real-time multiplayer browser games. It runs on Node.js, Express and Socket.IO, with a SQLite database for player profiles, coins and leaderboards.
 
-## Live Deployment
+The server is authoritative: each game runs its own simulation loop and broadcasts state to the clients over Socket.IO, so clients only send input.
 
-- **Frontend URL**: [http://gokalp.alkoc.net](http://gokalp.alkoc.net)
-- **Backend API / WebSocket Server**: [https://multiplayer-game-backend-y5na.onrender.com](https://multiplayer-game-backend-y5na.onrender.com)
+## Games
 
-## Games Included
+Each game is a separate module in `games/` with its own Socket.IO namespace.
 
-1. **Counter-Stride**: A fast-paced 2D multiplayer shooter.
-2. **Co-op Puzzle**: A cooperative puzzle game where players must color-match and work together to complete levels and avoid kill-blocks. Includes a dedicated level editor!
-3. **Territory Wars**: A real-time strategy (RTS) pixel-based conquest game featuring base-building, resource management, and unit combat.
-4. **Battle Pong**: A competitive, high-speed twist on the classic arcade game.
-5. **Pixel Kart**: A fast-paced, top-down multiplayer racing game.
+| Game | Namespace | What it is |
+|---|---|---|
+| Counter-Stride | `/counter-stride` | Fast 2D top-down shooter |
+| Battle Royale | `/battle-royale` | Up to 20 players on a generated 3200×3200 map with a shrinking zone |
+| Territory Wars | `/territory-wars` | Real-time strategy: build bases, gather resources and fight with units |
+| Brawler | `/brawler` | Platform fighter with gravity, double jumps and knockback |
+| Social Deduction | `/social-deduction` | Crew vs. impostor game with vision radius, sabotage, meetings and voting |
+| Co-op Puzzle | `/coop-puzzle` | Cooperative color-matching levels, with a map editor |
+| Pixel Kart | `/pixel-kart` | Top-down racing |
+| Battle Pong | `/battle-pong` | Competitive, high-speed Pong |
+| Donkey Competition | `/donkey-competition` | Race betting with a 30-second betting window and preset tracks |
 
-## Getting Started
+`games/globalHub.js` (`/hub`) handles everything shared between games: global chat, who is online, and parties.
 
-1. Open your terminal in this directory.
-2. Run `npm install` to install the required dependencies.
-3. Run `npm start` (or `npm run dev` for auto-restarting watch mode) to launch the local game server.
-4. Open your browser and navigate to `http://localhost:3000`.
-5. Open additional browser tabs (or use different browsers) navigating to the same address to simulate multiple players joining the lobby and games.
+## API
 
-## Map Editor
-Some games, such as Co-op Puzzle, support custom maps. Navigate to `http://localhost:3000/mapEditor.html` while the server is running to launch the visual map editor. You can design maps, add interactable elements, and export the map data for use in the games.
+| Endpoint | Returns |
+|---|---|
+| `GET /health` | `OK` |
+| `GET /api/leaderboard?sort=coins&limit=15` | Global leaderboard |
+| `GET /api/leaderboard/:game` | Leaderboard for one game |
+| `GET /api/user/:username` | A player's stats |
 
-## Project Structure
+## Running locally
 
-- `server.js`: The central Node.js backend entry point. Initializes the server and loads all game modules.
-- `games/`: Contains the backend logic and independent Socket.IO namespaces for each game (e.g., `coopPuzzle.js`, `territoryWars.js`).
-- `public/`: Contains the frontend static assets.
-  - `public/index.html`: The main lobby interface where players can select a game.
-  - `public/games/`: Holds the client-side scripts, stylesheets, and assets specifically scoped to each individual game.
-  - `public/mapEditor.html`: The frontend UI for the map editor.
+```bash
+npm install
+npm run dev      # restarts on file changes; or: npm start
+```
 
-## Tech Stack
+The server listens on port 3000. On first start it creates `data/arena.db` and its schema; the database is not tracked in git.
 
-- **Frontend:** HTML5 Canvas, Vanilla Javascript, Custom CSS
-- **Backend:** Node.js, Express
-- **Networking:** Socket.IO for real-time, bidirectional event-based communication.
+The browser client is deployed separately at [gokalp.alkoc.net](http://gokalp.alkoc.net) and is not part of this repository.
+
+## Project structure
+
+```
+server.js      Express + Socket.IO setup, leaderboard API, loads every game module
+db.js          SQLite schema and queries (users, per-game stats, coin transactions)
+games/         one module per game; each registers its own namespace and game loop
+```
+
+## Tech stack
+
+- Node.js, Express
+- Socket.IO for real-time, bidirectional networking
+- better-sqlite3 (WAL mode) for persistence
